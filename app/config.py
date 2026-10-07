@@ -6,6 +6,7 @@ loaded in :mod:`app.risk.profiles`.
 
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -152,8 +153,13 @@ class Settings(BaseSettings):
         errors: list[str] = []
         warnings: list[str] = []
         if require_telegram:
-            if not self.telegram_bot_token or not self.telegram_bot_token.get_secret_value():
+            token = self.telegram_bot_token.get_secret_value() if self.telegram_bot_token else ""
+            if not token:
                 errors.append("TELEGRAM_BOT_TOKEN is required")
+            elif not re.fullmatch(r"\d{5,15}:[A-Za-z0-9_-]{30,64}", token):
+                # Never echo the token itself.
+                errors.append("TELEGRAM_BOT_TOKEN looks malformed (expected <digits>:<letters/digits>, "
+                              "no spaces, quotes or trailing punctuation)")
             if not self.admin_ids:
                 errors.append("TELEGRAM_ADMIN_IDS must list at least one numeric Telegram user id")
         if self.live_trading and self.paper_trading:

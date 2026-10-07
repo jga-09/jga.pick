@@ -26,6 +26,14 @@ def test_missing_telegram_config_fails_safely():
         s.validate_runtime()
 
 
+def test_malformed_telegram_token_rejected_without_echo():
+    bad = "1234567890:FAKEfakeFAKEfakeFAKEfakeFAKEfake123."
+    with pytest.raises(ConfigError) as ei:
+        make_settings(telegram_bot_token=bad).validate_runtime()
+    assert "malformed" in str(ei.value) and bad not in str(ei.value)
+    make_settings(telegram_bot_token="1234567890:FAKEfakeFAKEfakeFAKEfakeFAKEfake123").validate_runtime()
+
+
 def test_live_without_credentials_fails():
     s = make_settings(data_source="kalshi", live_trading=True, paper_trading=False)
     with pytest.raises(ConfigError, match="KALSHI_API_KEY_ID"):

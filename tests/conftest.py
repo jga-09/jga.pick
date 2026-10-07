@@ -19,7 +19,7 @@ ADMIN_ID = 4242
 
 def make_settings(**kw: Any) -> Settings:
     base: dict[str, Any] = dict(_env_file=None, data_source="fixture", database_url="sqlite://",
-                                telegram_admin_ids=str(ADMIN_ID), telegram_bot_token="123456:TEST")
+                                telegram_admin_ids=str(ADMIN_ID), telegram_bot_token="1234567890:FAKEfakeFAKEfakeFAKEfakeFAKEfake123")
     base.update(kw)
     return Settings(**base)
 

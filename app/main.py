@@ -72,8 +72,15 @@ def main(argv: list[str] | None = None) -> int:
 
     from app.telegram.bot import build_application
 
+    from telegram.error import InvalidToken
+
     app = build_application(rt, settings.telegram_bot_token.get_secret_value())  # type: ignore[union-attr]
-    app.run_polling(allowed_updates=["message", "callback_query"], drop_pending_updates=True)
+    try:
+        app.run_polling(allowed_updates=["message", "callback_query"], drop_pending_updates=True)
+    except InvalidToken:
+        # PTB's message contains the token - log our own redacted message instead.
+        log.critical("TELEGRAM_TOKEN_REJECTED Telegram rejected TELEGRAM_BOT_TOKEN; get a fresh one from @BotFather")
+        return 2
     return 0
 
 
