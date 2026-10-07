@@ -1,0 +1,16 @@
+services:
+  bot:
+    build: .
+    container_name: kalshi-directional-bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: sqlite:////app/data/bot.db
+      # Only needed for authenticated data / live trading. Mount the key read-only:
+      # KALSHI_PRIVATE_KEY_PATH: /run/secrets/kalshi.pem
+    volumes:
+      - bot-data:/app/data
+      # - ./secrets/kalshi.pem:/run/secrets/kalshi.pem:ro
+
+volumes:
+  bot-data:
