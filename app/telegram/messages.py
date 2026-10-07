@@ -5,7 +5,7 @@ from __future__ import annotations
 from html import escape
 from typing import TYPE_CHECKING, Any
 
-from app import APP_NAME, DISPLAY_VERSION
+from app import APP_NAME
 from app.kalshi.market_data import ASSET_ICONS, MarketSnapshot
 from app.risk.profiles import RiskLevel, RiskProfile
 from app.strategy.signals import Direction, SignalResult, Validity
@@ -80,7 +80,7 @@ def home(rt: BotRuntime) -> Screen:
         status_line = "🟢 Online — waiting for signal"
 
     lines = [
-        f"📡 <b>{APP_NAME} v{DISPLAY_VERSION}</b>",
+        f"📡 <b>{APP_NAME}</b>",
         f"{run} · {data}",
         status_line,
         f"🎯 Market: {escape(view.info.label) if view else '—'}",

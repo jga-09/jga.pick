@@ -1,4 +1,4 @@
-# 📡 DirectionalBot — Kalshi 15-Minute Directional Trading Bot
+# 📡 JGAPicksBot — Kalshi 15-Minute Directional Trading Bot
 
 A Telegram-controlled bot that discovers Kalshi short-duration (15-minute) markets, scores them
 **🟢 UP / 🔴 DOWN / ⚪ WAIT** with a 0–100 confidence, checks every trade against a
