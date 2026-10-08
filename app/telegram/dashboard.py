@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import html
+import re
 import logging
 import time
 from collections import deque
@@ -62,6 +64,8 @@ class DashboardManager:
 
     async def _edit(self, chat_id: int, message_id: int, screen: Screen) -> bool:
         try:
+            if _bad_html(screen.text):
+                raise BadRequest("Can't parse entities: pre-check")
             await self.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=screen.text,
                                              parse_mode=ParseMode.HTML, reply_markup=to_markup(screen),
                                              disable_web_page_preview=True)
@@ -69,6 +73,8 @@ class DashboardManager:
         except BadRequest as exc:
             if "not modified" in str(exc).lower():
                 return True
+            if "parse entities" in str(exc).lower():
+                return await self._edit_plain(chat_id, message_id, screen, exc)
             log.warning("DASHBOARD_EDIT_FAILED chat=%s error=%s", chat_id, exc)
             return False
         except RetryAfter as exc:
@@ -78,11 +84,36 @@ class DashboardManager:
             log.warning("DASHBOARD_EDIT_NETWORK chat=%s error=%s", chat_id, exc)
             return True
 
+    async def _edit_plain(self, chat_id: int, message_id: int, screen: Screen, exc: Exception) -> bool:
+        log.error("TELEGRAM_HTML_INVALID route=%s error=%s - sending as plain text", screen.route, exc)
+        try:
+            await self.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=_plain(screen.text),
+                                             reply_markup=to_markup(screen), disable_web_page_preview=True)
+            return True
+        except BadRequest as exc2:
+            return "not modified" in str(exc2).lower()
+        except (TimedOut, NetworkError):
+            return True
+
     async def _send(self, chat_id: int, screen: Screen) -> Any:
         try:
+            if _bad_html(screen.text):
+                raise BadRequest("Can't parse entities: pre-check")
             return await self.bot.send_message(chat_id=chat_id, text=screen.text, parse_mode=ParseMode.HTML,
                                                reply_markup=to_markup(screen), disable_web_page_preview=True)
-        except (Forbidden, BadRequest, TimedOut, NetworkError) as exc:
+        except BadRequest as exc:
+            if "parse entities" not in str(exc).lower():
+                log.warning("TELEGRAM_SEND_FAILED chat=%s error=%s", chat_id, exc)
+                return None
+            # Never lose a dashboard/alert to a formatting bug: fall back to plain text.
+            log.error("TELEGRAM_HTML_INVALID route=%s error=%s - sending as plain text", screen.route, exc)
+            try:
+                return await self.bot.send_message(chat_id=chat_id, text=_plain(screen.text),
+                                                   reply_markup=to_markup(screen), disable_web_page_preview=True)
+            except (Forbidden, BadRequest, TimedOut, NetworkError) as exc2:
+                log.warning("TELEGRAM_SEND_FAILED chat=%s error=%s", chat_id, exc2)
+                return None
+        except (Forbidden, TimedOut, NetworkError) as exc:
             log.warning("TELEGRAM_SEND_FAILED chat=%s error=%s", chat_id, exc)
             return None
 
@@ -120,6 +151,19 @@ class DashboardManager:
                     continue
                 if screen.text != view.last_text:
                     await self.show(chat_id, view.user_id, screen)
+
+
+_ALLOWED_TAG = re.compile(r"</?(b|i|code)>")
+
+
+def _bad_html(text: str) -> bool:
+    """True if text has a '<' that is not one of the tags we use (Telegram would reject it)."""
+    stripped = _ALLOWED_TAG.sub("", text)
+    return "<" in stripped or ">" in stripped
+
+
+def _plain(text: str) -> str:
+    return html.unescape(_ALLOWED_TAG.sub("", text))
 
 
 class AlertManager:

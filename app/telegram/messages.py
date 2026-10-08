@@ -108,7 +108,7 @@ def home(rt: BotRuntime) -> Screen:
     else:
         lines += ["🎯 Signal: ⚪ —", "No market data yet" if st.running else "Press 🟢 Start to begin"]
     best_t = rt.model.best("time")
-    lines += [f"🕐 Best window: {best_t.key.split('/')[1] + ' min' if best_t else 'insufficient data'}"]
+    lines += [f"🕐 Best window: {escape(best_t.key.split('/')[1]) + ' min' if best_t else 'insufficient data'}"]
     if rt.adaptive.mode != "NORMAL":
         lines += [rt.adaptive.badge]
     lines += [
@@ -137,7 +137,7 @@ def _hist_lines(rt: BotRuntime, view: MarketView) -> list[str]:
 def _time_window(rt: BotRuntime, bucket: str) -> str:
     best = rt.model.best("time")
     star = " ⭐" if best is not None and best.key.endswith("/" + bucket) else ""
-    return f"{bucket} min{star}"
+    return f"{escape(bucket)} min{star}"
 
 
 def signal_card(rt: BotRuntime, ticker: str) -> Screen:
@@ -438,7 +438,7 @@ def history(rt: BotRuntime, period: str) -> Screen:
             "", "<b>By asset</b>", *[f"{ASSET_ICONS.get(a, '•')} {a}: {money(v)}" for a, v in s.by_asset.items()],
             "", "<b>By risk</b>", *[f"{RiskLevel(r).emoji} {r.upper()}: {money(v)}" for r, v in s.by_risk.items()],
             "", "<b>By confidence</b>",
-            *[f"{b}: {n} trades · {w}W · {money(p)}" for b, (n, w, p) in s.by_confidence.items()],
+            *[f"{escape(b)}: {n} trades · {w}W · {money(p)}" for b, (n, w, p) in s.by_confidence.items()],
         ]
     if mode == "paper":
         lines += ["", f"Paper balance: {money(rt.portfolio.paper_balance(), False)} "

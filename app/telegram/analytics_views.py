@@ -117,9 +117,9 @@ def analytics(rt: BotRuntime) -> Screen:
         lines.append(f"{g}: {stat_line(m.stat('grade', g), n_min)}")
     best_regime, best_time, best_price = m.best("regime"), m.best("time"), m.best("price")
     lines += [SEP,
-              f"Best Regime: {best_regime.key.split('/')[1] if best_regime else INSUFFICIENT}",
-              f"Best Time: {best_time.key.split('/')[1] + ' min' if best_time else INSUFFICIENT}",
-              f"Best Entry: {' '.join(best_price.key.split('/')[1:]) + '¢' if best_price else INSUFFICIENT}"]
+              f"Best Regime: {escape(best_regime.key.split('/')[1]) if best_regime else INSUFFICIENT}",
+              f"Best Time: {escape(best_time.key.split('/')[1]) + ' min' if best_time else INSUFFICIENT}",
+              f"Best Entry: {escape(' '.join(best_price.key.split('/')[1:])) + '¢' if best_price else INSUFFICIENT}"]
     feats = rt.research("importance")
     ok = [f for f in feats if f.stars > 0]
     lines += [SEP, f"Best Feature: {COMPONENT_LABELS.get(ok[0].name, ok[0].name) if ok else INSUFFICIENT}",
@@ -138,7 +138,7 @@ def detailed(rt: BotRuntime) -> Screen:
     for b in TIME_BUCKETS:
         st = m.stat("time", b)
         star = " ⭐" if best_t and st and st.key == best_t.key else ""
-        lines.append(f"{b:>5} min: {stat_line(st, n_min)}{star}")
+        lines.append(f"{escape(b):>5} min: {stat_line(st, n_min)}{star}")
     lines += ["", "<b>Regime (UP / DOWN)</b>"]
     for r in Regime:
         up, dn = m.stat("regime_dir", r.value, "UP"), m.stat("regime_dir", r.value, "DOWN")
@@ -149,7 +149,7 @@ def detailed(rt: BotRuntime) -> Screen:
     lines += ["", "<b>Entry price</b>"]
     for st in m.table("price"):
         side, bucket = st.key.split("/")[1:]
-        lines.append(f"{side.upper()} {bucket}¢: {stat_line(st, n_min)}")
+        lines.append(f"{side.upper()} {escape(bucket)}¢: {stat_line(st, n_min)}")
     lines += ["", "<b>Momentum state</b>"]
     for st in m.table("accel"):
         lines.append(f"{st.key.split('/')[1].title()}: {stat_line(st, n_min)}")
@@ -173,7 +173,7 @@ def calibration(rt: BotRuntime) -> Screen:
 
 
 def _calib_row(st: GroupStat, n_min: int) -> str:
-    b = st.key.split("/")[1]
+    b = escape(st.key.split("/")[1])
     if st.n_markets < n_min:
         return f"{b}: {INSUFFICIENT} (n={st.n_markets})"
     return f"{b}: {st.n_markets} | {st.win_rate:.0%} | {st.avg_price:.0f}¢ | edge {st.edge * 100:+.1f}pp"
@@ -210,7 +210,7 @@ def win_analysis(rt: BotRuntime) -> Screen:
         e = last["entry"]
         lines += ["<b>Last win</b>", escape(last["ticker"]), e.get("direction", "?"), "", "Successful conditions:"]
         lines += [f"✓ {WIN_TEXT.get(t, t)}" for t in last["tags"]] or ["—"]
-        lines += [f"✓ {e.get('time_bucket', '?')} minutes remaining", "",
+        lines += [f"✓ {escape(str(e.get('time_bucket', '?')))} minutes remaining", "",
                   f"<b>Recurring patterns</b> ({len(wins)} wins)"]
         for text, n in pattern_counts(ctxs, won=True)[:8]:
             lines.append(f"• {escape(text)}: {n}")

@@ -61,3 +61,31 @@ async def test_unauthorized_command_refused(runtime):
 
 async def _record(lst, t):
     lst.append(t)
+
+
+def test_html_guard_and_plain_fallback():
+    from app.telegram.dashboard import _bad_html, _plain
+
+    assert _bad_html("Best window: <1 min")
+    assert not _bad_html("<b>Best</b> window: &lt;1 min")
+    assert _plain("<b>x</b> &lt;1") == "x <1"
+
+
+async def test_screens_escape_bucket_labels(runtime):
+    """Regression: a '<1' time bucket / '<50' price bucket broke /menu (Telegram rejected the HTML)."""
+    from datetime import timedelta
+
+    from app.research.calibration import HistoricalModel
+    from app.telegram import analytics_views as AV
+    from app.telegram import messages as M
+    from app.telegram.dashboard import _bad_html
+    from tests.test_research import obs
+
+    rows = [obs(i, minute=0, outcome="yes", price=45) for i in range(40)]
+    for o in rows:
+        o.time_remaining = 30  # "<1" minute bucket
+        o.ts = o.close_time - timedelta(seconds=30)
+    runtime.model = HistoricalModel(rows, min_samples=30)
+    assert runtime.model.best("time") is not None
+    for screen in (M.home(runtime), AV.analytics(runtime), AV.detailed(runtime), AV.calibration(runtime)):
+        assert not _bad_html(screen.text), screen.text

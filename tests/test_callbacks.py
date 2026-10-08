@@ -3,6 +3,7 @@ import pytest
 from app.errors import InvalidCallbackError
 from app.risk.profiles import RiskLevel
 from app.telegram.callbacks import CallbackGuard, CallbackRouter, parse_callback
+from app.telegram.dashboard import _bad_html
 from tests.conftest import ADMIN_ID, feed_history, make_info
 
 
@@ -111,6 +112,7 @@ async def test_all_screens_render(runtime, router):
                   "wins", "exp", "filt", "feat"):
         resp = await router.handle(ADMIN_ID, route)
         assert resp.screen is not None and resp.screen.text, route
+        assert not _bad_html(resp.screen.text), (route, resp.screen.text)
         for row in resp.screen.buttons:
             assert 1 <= len(row) <= 2
             for _, data in row:
