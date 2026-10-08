@@ -82,6 +82,16 @@ class Settings(BaseSettings):
     # --- Signal engine --------------------------------------------------
     signal_min_confidence: int = Field(55, ge=0, le=100)
     signal_min_history_sec: float = Field(60.0, ge=0, le=900)
+    # Strategy research / quality layer
+    signal_weights: dict[str, float] = Field(default_factory=dict)  # e.g. {"momentum": 20}
+    strategy_params: dict[str, float] = Field(default_factory=dict)  # StrategyConfig overrides
+    disabled_filters: str = ""  # comma list of no-trade filters to switch off
+    hist_min_samples: int = Field(30, ge=10, le=10_000)  # distinct markets before a statistic is trusted
+    calibration_prior_strength: float = Field(20.0, ge=0, le=1000)
+    # "lower": gate on the conservative (80% lower-bound) EV estimate; "point": on the shrunk point estimate
+    ev_gate: Literal["lower", "point"] = "lower"
+    observation_retention_days: int = Field(365, ge=7)
+    model_refresh_sec: float = Field(600.0, ge=30)
     signal_history_size: int = Field(240, ge=20, le=5000)
 
     # --- Telegram UI / alerts -------------------------------------------

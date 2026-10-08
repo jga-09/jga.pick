@@ -32,8 +32,13 @@ def build_runtime(settings: Settings) -> BotRuntime:
         client = KalshiClient(settings, signer)
     repo = Repository(Database(settings.database_url))
     repo.init()
-    return BotRuntime(settings, repo, client, underlying=build_provider(settings.underlying_provider),
-                      profiles=load_profiles())
+    if settings.data_source == "fixture":
+        from app.kalshi.fixtures import FixtureUnderlyingProvider
+
+        underlying = FixtureUnderlyingProvider(client=client)  # synthetic, paired with fixture markets
+    else:
+        underlying = build_provider(settings.underlying_provider)
+    return BotRuntime(settings, repo, client, underlying=underlying, profiles=load_profiles())
 
 
 def main(argv: list[str] | None = None) -> int:

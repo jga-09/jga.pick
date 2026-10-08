@@ -7,9 +7,11 @@ This is *synthetic* data and is always labelled as such in the UI
 from __future__ import annotations
 
 import math
+from statistics import NormalDist
 from datetime import datetime, timedelta
 from typing import Any
 
+from app.data.underlying import SpotPrice
 from app.kalshi.market_data import (
     MarketInfo,
     MarketSnapshot,
@@ -20,7 +22,26 @@ from app.kalshi.market_data import (
 from app.utils.time import utcnow
 
 WINDOW_SEC = 900
+_ND = NormalDist()
 FIXTURE_TRENDS = {"BTC": "up", "ETH": "flat", "SOL": "down"}
+FIXTURE_STRIKES = {"BTC": 60000.0, "ETH": 2500.0, "SOL": 150.0}
+
+
+def fixture_spot_price(asset: str, trend: str, t: float) -> float:
+    """Synthetic spot consistent with the fixture YES path (0.4% move over a window)."""
+    k = FIXTURE_STRIKES.get(asset, 100.0)
+    drift = {"up": 1, "down": -1}.get(trend, 0) * 0.004 * (t / WINDOW_SEC)
+    return k * (1 + drift + (0.00005 if trend == "flat" and int(t / 25) % 2 else 0))
+
+
+def fixture_spot_history(asset: str, trend: str, info: MarketInfo, now: datetime,
+                         seconds: int = 240, step: int = 5) -> list[SpotPrice]:
+    out = []
+    for back in range(seconds, -1, -step):
+        ts = now - timedelta(seconds=back)
+        t = (ts - info.open_time).total_seconds() if info.open_time else 0
+        out.append(SpotPrice(asset, fixture_spot_price(asset, trend, t), ts, "fixture"))
+    return out
 
 
 def window_bounds(now: datetime) -> tuple[datetime, datetime]:
@@ -29,13 +50,20 @@ def window_bounds(now: datetime) -> tuple[datetime, datetime]:
 
 
 def fixture_mid(trend: str, t: float) -> float:
-    """YES mid (cents) as a function of seconds since window open."""
+    """YES mid (cents) as a function of seconds since window open.
+
+    Paths are defined in probit space so that "up"/"down" are clean, steady,
+    clearly-trending moves for a 15-minute binary (not over-extended mid-window)
+    and "flat" is a sideways chop around 50c.
+    """
+    x = max(t, 0) / WINDOW_SEC
     if trend == "up":
-        v = 50 + 40 * (t / WINDOW_SEC) + 0.4 * math.sin(t / 7)
+        z = -1.2 + 8.0 * x ** 1.8
     elif trend == "down":
-        v = 50 - 40 * (t / WINDOW_SEC) + 0.4 * math.sin(t / 7)
+        z = 1.2 - 8.0 * x ** 1.8
     else:
-        v = 51 + 1.2 * math.sin(t / 25)
+        z = 0.03 + 0.05 * math.sin(t / 25)
+    v = 100 * _ND.cdf(z) + (0.4 * math.sin(t / 7) if trend != "flat" else 0.0)
     return max(3.0, min(97.0, round(v)))
 
 
@@ -46,7 +74,7 @@ def fixture_info(asset: str, now: datetime) -> MarketInfo:
     return MarketInfo(
         ticker=f"{series}-{stamp}", event_ticker=f"{series}-{stamp}", series_ticker=series, asset=asset,
         title=f"{asset} price up in next 15 mins?", subtitle="Fixture market", open_time=start,
-        close_time=end, expiration_time=end, status="active",
+        close_time=end, expiration_time=end, status="active", floor_strike=FIXTURE_STRIKES.get(asset),
     )
 
 
@@ -64,7 +92,7 @@ def fixture_market_raw(info: MarketInfo, mid: float, spread: float = 2.0) -> dic
 
 
 def fixture_book(mid: float, trend: str, spread: float = 2.0) -> OrderBook:
-    yes_w, no_w = {"up": (3.0, 1.0), "down": (1.0, 3.0)}.get(trend, (1.0, 1.0))
+    yes_w, no_w = {"up": (5.0, 1.0), "down": (1.0, 5.0)}.get(trend, (1.0, 1.0))
     yes_best, no_best = mid - spread / 2, 100 - (mid + spread / 2)
     yes = tuple((yes_best - i, 40 * yes_w) for i in range(5))
     no = tuple((no_best - i, 40 * no_w) for i in range(5))
@@ -75,9 +103,9 @@ def fixture_trades(trend: str, now: datetime, n: int = 8) -> tuple[TradePrint, .
     out = []
     for i in range(n):
         if trend == "up":
-            side = "yes" if i % 4 else "no"
+            side = "yes" if i % 8 else "no"
         elif trend == "down":
-            side = "no" if i % 4 else "yes"
+            side = "no" if i % 8 else "yes"
         else:
             side = "yes" if i % 2 else "no"
         ts = now - timedelta(seconds=10 * i)
@@ -174,3 +202,32 @@ class FixtureKalshiClient:
 
     async def create_order_v2(self, body: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("fixture client can never submit orders")
+
+
+class FixtureUnderlyingProvider:
+    """Synthetic spot feed paired with FixtureKalshiClient (DATA_SOURCE=fixture only)."""
+
+    name = "fixture"
+
+    def __init__(self, clock: Any = utcnow, client: FixtureKalshiClient | None = None) -> None:
+        self.clock = clock
+        self.client = client
+
+    async def get_price(self, asset: str) -> SpotPrice | None:
+        hist = self.history(asset)
+        return hist[-1] if hist else None
+
+    def history(self, asset: str) -> list[SpotPrice]:
+        if asset not in FIXTURE_TRENDS:
+            return []
+        now = self.clock()
+        info, trend = fixture_info(asset, now), FIXTURE_TRENDS[asset]
+        if self.client is not None:  # follow markets registered on the paired fixture client
+            live = [(i, tr) for i, tr in self.client._markets.values()
+                    if i.asset == asset and i.open_time and i.open_time <= now < i.close_time]
+            if live:
+                info, trend = max(live, key=lambda x: x[0].open_time)
+        return fixture_spot_history(asset, trend, info, now)
+
+    async def close(self) -> None:
+        return None

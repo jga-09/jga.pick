@@ -34,6 +34,8 @@ Market discovery → Market data (REST poll + WebSocket) → Feature engine → 
 
 | Area | Highlights |
 |---|---|
+| Signal quality | 10-component Signal Quality score, setup grades, 19 no-trade filters, regimes, EV gate, adaptive mode |
+| Research | Observation dataset, calibration, walk-forward backtests, filter ablation, feature importance, win/loss analysis |
 | Telegram UI | Home dashboard, signal cards, markets list, status, trades, positions, history, strategy, config, risk menu with confirmation, emergency stop |
 | Signals | Momentum, ROC, EMA trend, regression slope, acceleration, volatility, order-book imbalance, taker trade flow, volume acceleration, probability level, optional spot-vs-strike |
 | Risk | 3 real profiles, env-configurable, Telegram customisation bounded by hard limits |
@@ -184,6 +186,41 @@ the best ask, and it is priced at the worst-case limit (ask + `ORDER_PRICE_TOLER
 **HIGH never disables safeguards.** Hard limits in `app/risk/profiles.py` bound every profile and
 every Telegram customisation. **Risk level and paper/live mode are independent:** choosing HIGH
 never enables live trading.
+
+## 15b. Signal quality, no-trade filter and research system
+
+Every evaluation now produces a **SetupAnalysis** on top of the direction/confidence:
+
+| Piece | What it does |
+|---|---|
+| **10 components** | A momentum · B trend · C order book · D volume/aggressive flow · E volatility · F probability movement · G time · H underlying · I acceleration · J liquidity/spread (+ signal stability). Moves are measured in *normalised* (probit) units: a 15-min binary naturally swings more as expiry nears, so raw cents are not comparable across the window. |
+| **Signal Quality 0-100** | Points per component (configurable `SIGNAL_WEIGHTS`). Agreement earns points, disagreement subtracts. Separate from confidence. |
+| **Setup grade** | A+ (≥90, no warnings) · A (≥80) · B (≥70) · C (≥60) · NO TRADE. LOW trades A+/A, MEDIUM/HIGH A+/A/B; C only if `HIGH_ALLOWED_GRADES` includes it. |
+| **No-trade filter** | 19 named filters (conflict, weak momentum, low volume, abnormal spread, thin liquidity, sideways, extreme volatility, too little time, flip-flopping, coin-flip near strike, underlying conflict/divergence, weak book, extended move, adverse-selection spike, deceleration, …). Hard filters always block; soft ones count against the profile's `MAX_SOFT_FLAGS`. Disable one with `DISABLED_FILTERS` only when research shows it hurts. |
+| **Regime** | STRONG/MODERATE TREND, SIDEWAYS, HIGH VOLATILITY, CHAOTIC, LOW LIQUIDITY. |
+| **Historical model** | Every graded setup is stored once per market-minute in `observations` and labelled with the real result when the market settles. Statistics count *distinct markets*, show "⚠️ INSUFFICIENT DATA" below `HIST_MIN_SAMPLES`, and edge estimates are shrunk towards zero (`CALIBRATION_PRIOR_STRENGTH`). |
+| **EV gate** | Estimated EV per contract after fees + slippage must exceed the profile's `MIN_EV_CENTS` once data exists. LOW (and any live trade) requires a supported EV estimate; MEDIUM/HIGH paper trades are allowed while data is collected and are marked INSUFFICIENT DATA. |
+| **Historically-poor conditions** | A regime / time window / price range / grade is blocked only when the *upper* bound of its win-rate interval is still below break-even. |
+| **Adaptive mode** | CAUTION (stricter) or PAUSED when volatility is beyond the 95th/99th percentile of history, data is stale, or the last 20 trades are far below the model's expectation. Never reacts to a handful of trades. |
+| **Win / loss analysis** | Each closed trade is tagged (momentum reversal, order-book flip, late entry, …) by comparing entry vs. last-seen conditions. |
+
+Telegram: signal cards show quality, grade, regime, momentum state, underlying confirmation, similar-setup
+statistics, edge and EV; **🧠 Why?** and **📋 Checklist** explain every decision; **🧠 Strategy → 📈 Analytics**
+has detailed stats, calibration, loss/win analysis, the V0-V6 strategy comparison, filter ablation and
+feature performance.
+
+### Research workflow
+
+```bash
+python scripts/research.py              # REAL data: calibration, regimes, time/price buckets,
+                                        # feature importance, walk-forward V0-V6, filter ablation
+python scripts/simulate.py              # SYNTHETIC sanity check of the machinery (not market evidence)
+```
+
+Walk-forward = rolling train → validate → out-of-sample test over chronological chunks of markets
+(or `--unit days`). Only V6 learns anything, and only from data earlier than its test period.
+Nothing is deployed automatically: change thresholds/filters in `.env` only when out-of-sample results
+with ≥30 trades support it.
 
 ## 16. Enabling live trading (deliberately)
 

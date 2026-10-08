@@ -191,3 +191,52 @@ class StrategySettingRow(Base):
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[str] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
+
+
+class ObservationRow(Base):
+    """One graded setup per market per minute, labelled with the market result later.
+
+    This is the research dataset: calibration, regime/time/price analytics,
+    feature importance and walk-forward backtests are all computed from it.
+    """
+
+    __tablename__ = "observations"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source: Mapped[str] = mapped_column(String(8), default="live")  # live | sim
+    ts: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
+    ticker: Mapped[str] = mapped_column(String(80), index=True)
+    asset: Mapped[str] = mapped_column(String(10))
+    close_time: Mapped[datetime] = mapped_column(UTCDateTime)
+    minute: Mapped[int] = mapped_column(Integer)  # whole minutes remaining
+    time_remaining: Mapped[float] = mapped_column(Float)
+    direction: Mapped[str] = mapped_column(String(5))
+    confidence: Mapped[int] = mapped_column(Integer)
+    quality: Mapped[int] = mapped_column(Integer)
+    grade: Mapped[str] = mapped_column(String(10))
+    regime: Mapped[str] = mapped_column(String(20))
+    accel_state: Mapped[str] = mapped_column(String(14))
+    underlying_state: Mapped[str] = mapped_column(String(12))
+    stability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    yes_ask: Mapped[float | None] = mapped_column(Float, nullable=True)
+    no_ask: Mapped[float | None] = mapped_column(Float, nullable=True)
+    spread: Mapped[float | None] = mapped_column(Float, nullable=True)
+    hard_flags: Mapped[str] = mapped_column(Text, default="[]")
+    soft_flags: Mapped[str] = mapped_column(Text, default="[]")
+    components: Mapped[str] = mapped_column(Text, default="{}")
+    features: Mapped[str] = mapped_column(Text, default="{}")
+    outcome: Mapped[str | None] = mapped_column(String(4), nullable=True, index=True)  # yes | no
+    __table_args__ = (Index("ux_obs_ticker_minute", "ticker", "minute", "source", unique=True),)
+
+
+class TradeContextRow(Base):
+    """Entry/exit conditions and win/loss analysis for each position."""
+
+    __tablename__ = "trade_context"
+    position_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ticker: Mapped[str] = mapped_column(String(80))
+    entry: Mapped[str] = mapped_column(Text, default="{}")
+    exit: Mapped[str] = mapped_column(Text, default="{}")
+    tags: Mapped[str] = mapped_column(Text, default="[]")
+    won: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    summary: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)

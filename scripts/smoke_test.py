@@ -19,11 +19,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.config import Settings  # noqa: E402
 from app.database.db import Database  # noqa: E402
 from app.database.repository import Repository  # noqa: E402
-from app.kalshi.fixtures import FIXTURE_TRENDS, FixtureKalshiClient, make_snapshot  # noqa: E402
+from app.kalshi.fixtures import (  # noqa: E402
+    FIXTURE_STRIKES,
+    FIXTURE_TRENDS,
+    FixtureKalshiClient,
+    FixtureUnderlyingProvider,
+    fixture_spot_history,
+    make_snapshot,
+)
 from app.kalshi.market_data import MarketInfo  # noqa: E402
 from app.risk.profiles import RiskLevel, load_profiles  # noqa: E402
 from app.runtime import BotRuntime  # noqa: E402
 from app.strategy.signals import Direction  # noqa: E402
+from app.telegram import analytics_views as AV  # noqa: E402
 from app.telegram import messages as M  # noqa: E402
 from app.telegram.callbacks import CallbackRouter  # noqa: E402
 from app.utils.logging import setup_logging  # noqa: E402
@@ -58,7 +66,8 @@ async def main() -> None:
     client = FixtureKalshiClient(clock=lambda: clock["now"])
     repo = Repository(Database(settings.database_url))
     repo.init()
-    rt = BotRuntime(settings, repo, client, profiles=load_profiles(read_env=False))
+    rt = BotRuntime(settings, repo, client, underlying=FixtureUnderlyingProvider(lambda: clock["now"], client),
+                    profiles=load_profiles(read_env=False))
     router = CallbackRouter(rt, settings.admin_ids)
 
     # 1) Sample markets: 15-minute windows with 8:42 remaining.
@@ -69,6 +78,7 @@ async def main() -> None:
             ticker=f"KX{asset}15M-SMOKE", event_ticker=f"KX{asset}15M-SMOKE", series_ticker=f"KX{asset}15M",
             asset=asset, title=f"{asset} up in 15 min?", subtitle="", open_time=now - timedelta(seconds=378),
             close_time=now + timedelta(seconds=522), expiration_time=None, status="active",
+            floor_strike=FIXTURE_STRIKES[asset],
         )
         client.register(info, trend)
         rt.discovery.state.current[asset] = info
@@ -81,14 +91,21 @@ async def main() -> None:
         for asset, trend in FIXTURE_TRENDS.items():
             snap = make_snapshot(asset, trend, ts, info=infos[asset], ts=ts)
             rt.market_data.latest[snap.ticker] = snap
-            rt.engine.evaluate(snap, threshold=rt.profile().min_confidence, threshold_label="LOW", now=ts)
+            spot = fixture_spot_history(asset, trend, infos[asset], ts)  # synthetic spot feed
+            rt._last_signal[snap.ticker] = rt.engine.evaluate(
+                snap, threshold=rt.profile().min_confidence, min_quality=rt.profile().min_signal_quality,
+                threshold_label="LOW", now=ts, spot=spot[-1], spot_history=spot)
 
     sigs = {a: rt.engine.latest[i.ticker] for a, i in infos.items()}
     show("HOME (bot stopped)", M.home(rt))
     show("MARKETS", M.markets_list(rt))
-    check(sigs["BTC"].direction is Direction.UP, f"BTC signal UP ({sigs['BTC'].confidence}%)")
-    check(sigs["SOL"].direction is Direction.DOWN, f"SOL signal DOWN ({sigs['SOL'].confidence}%)")
-    check(sigs["ETH"].direction is Direction.WAIT, f"ETH signal WAIT ({sigs['ETH'].confidence}%)")
+    def desc(s):  # type: ignore[no-untyped-def]
+        return f"conf {s.confidence}%, quality {s.analysis.quality}, {s.analysis.grade}, {s.analysis.regime.value}"
+
+    check(sigs["BTC"].leaning is Direction.UP, f"BTC leans UP ({desc(sigs['BTC'])})")
+    check(sigs["SOL"].leaning is Direction.DOWN, f"SOL leans DOWN ({desc(sigs['SOL'])})")
+    check(sigs["ETH"].direction is Direction.WAIT and not sigs["ETH"].analysis.tradeable,
+          f"ETH is NO TRADE: {', '.join(sigs['ETH'].analysis.reasons[:3])}")
 
     # 3) Risk: rejection while stopped, rejection for WAIT, approval once running.
     await router.handle(ADMIN, "resume")
@@ -97,11 +114,18 @@ async def main() -> None:
     rt.store.update(running=True)  # equivalent to Start, without background network loops
     d_eth = rt.view(infos["ETH"].ticker).decision
     check(not d_eth.approved, f"ETH WAIT rejected: {d_eth.reason}")
+    d_low = rt.view(infos["BTC"].ticker).decision
+    check(not d_low.approved, f"LOW rejects BTC: {d_low.reason}")
+    show("SIGNAL CARD · BTC under LOW (NO TRADE)", M.signal_card(rt, infos["BTC"].ticker))
+    show("CHECKLIST · BTC under LOW", AV.checklist(rt, infos["BTC"].ticker))
+    rt.store.update(risk_level=RiskLevel.HIGH)
     d_btc = rt.view(infos["BTC"].ticker).decision
-    check(d_btc.approved, f"BTC approved under LOW: {d_btc.position_size} contracts @ {d_btc.price_cents:.0f}¢")
-    show("SIGNAL CARD · BTC (UP)", M.signal_card(rt, infos["BTC"].ticker))
-    show("SIGNAL CARD · SOL (DOWN)", M.signal_card(rt, infos["SOL"].ticker))
-    show("SIGNAL CARD · ETH (WAIT)", M.signal_card(rt, infos["ETH"].ticker))
+    check(d_btc.approved, f"HIGH approves BTC (paper): {d_btc.position_size} contracts @ {d_btc.price_cents:.0f}¢ "
+                          f"| warnings: {'; '.join(d_btc.warnings)}")
+    show("SIGNAL CARD · BTC under HIGH", M.signal_card(rt, infos["BTC"].ticker))
+    show("WHY? · BTC", AV.why(rt, infos["BTC"].ticker))
+    show("SIGNAL CARD · ETH (NO TRADE)", M.signal_card(rt, infos["ETH"].ticker))
+    rt.store.update(risk_level=RiskLevel.LOW)
 
     # Risk change requires confirmation.
     resp = await router.handle(ADMIN, "rset:high")
@@ -109,9 +133,7 @@ async def main() -> None:
     show("RISK CONFIRM", resp.screen)
     await router.handle(ADMIN, "rok:high")
     check(rt.state.risk_level is RiskLevel.HIGH, "Confirm switches risk to HIGH")
-    await router.handle(ADMIN, "rok:low")
-
-    # 4) Paper trade through the real Telegram callback flow.
+    # 4) Paper trade through the real Telegram callback flow (HIGH risk).
     resp = await router.handle(ADMIN, f"buy:{infos['BTC'].ticker}")
     show("PAPER TICKET", resp.screen)
     ticket_id = resp.screen.buttons[0][0][1].split(":")[1]
@@ -121,8 +143,10 @@ async def main() -> None:
     check(dup.screen is None and "already used" in (dup.toast or ""), "Duplicate confirm is rejected")
     opens = rt.portfolio.open_positions("paper")
     check(len(opens) == 1, f"1 open paper position (balance {M.money(rt.portfolio.paper_balance(), False)})")
+    rt.store.update(risk_level=RiskLevel.LOW)
     d2 = rt.view(infos["SOL"].ticker).decision
-    check(not d2.approved, f"Second trade blocked under LOW: {d2.reason}")
+    check(not d2.approved, f"SOL blocked under LOW: {d2.reason}")
+    rt.store.update(risk_level=RiskLevel.HIGH)
     show("POSITIONS", M.positions(rt))
 
     # 5) Market closes -> settlement -> P&L update.
@@ -134,6 +158,8 @@ async def main() -> None:
     show("TRADES", M.trades(rt))
     show("HISTORY · TODAY", M.history(rt, "today"))
     show("STATUS", M.status(rt))
+    show("ANALYTICS", AV.analytics(rt))
+    show("LOSS/WIN ANALYSIS", AV.win_analysis(rt))
 
     # 6) Emergency stop blocks orders.
     await router.handle(ADMIN, "estopok")

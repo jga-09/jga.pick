@@ -8,17 +8,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.strategy.indicators import clamp, squash
+from app.strategy.components import directional_components
 from app.strategy.signals import Reason
 
-# Component weights (re-normalised over the components that have data).
+# Confidence weights over directional components (re-normalised over available ones).
+# The market's own price level is intentionally NOT a component: the price already
+# reflects it, so leaning on it just means buying expensive favourites.
 DEFAULT_WEIGHTS: dict[str, float] = {
-    "momentum": 0.25,
-    "trend": 0.20,
-    "book": 0.15,
-    "flow": 0.15,
-    "level": 0.10,
-    "underlying": 0.15,
+    "momentum": 0.22,
+    "trend": 0.18,
+    "orderbook": 0.14,
+    "volume": 0.12,
+    "prob_move": 0.08,
+    "underlying": 0.18,
+    "acceleration": 0.08,
 }
 NEUTRAL_BAND = 0.08  # |score| below this is treated as no direction
 
@@ -31,42 +34,11 @@ class ScoreResult:
     reasons: tuple[Reason, ...]
 
 
-def _components(f: dict[str, float | None]) -> dict[str, float]:
-    c: dict[str, float] = {}
-    if f.get("mom_60s") is not None:
-        m = squash(f["mom_60s"], 3.0)  # a 3c move in 60s is a strong move
-        if f.get("accel") is not None:
-            m = clamp(m + 0.15 * squash(f["accel"], 3.0))
-        c["momentum"] = m
-    trend_parts = []
-    if f.get("ema_diff") is not None:
-        trend_parts.append(squash(f["ema_diff"], 2.0))
-    if f.get("slope_cpm") is not None:
-        trend_parts.append(squash(f["slope_cpm"], 1.5))
-    if trend_parts:
-        c["trend"] = sum(trend_parts) / len(trend_parts)
-    if f.get("book_imbalance") is not None:
-        c["book"] = clamp(f["book_imbalance"] * 1.2)
-    if f.get("trade_flow") is not None:
-        conf = min(1.0, (f.get("trade_count_120s") or 0) / 5)
-        c["flow"] = f["trade_flow"] * conf
-    if f.get("yes_mid") is not None:
-        c["level"] = squash(f["yes_mid"] - 50, 25.0)
-    und = []
-    if f.get("strike_dist_pct") is not None:
-        und.append(squash(f["strike_dist_pct"], 0.10))
-    if f.get("spot_mom_pct") is not None:
-        und.append(squash(f["spot_mom_pct"], 0.05))
-    if und:
-        c["underlying"] = sum(und) / len(und)
-    return c
-
-
 def score_features(
     f: dict[str, float | None], weights: dict[str, float] | None = None
 ) -> ScoreResult:
     weights = weights or DEFAULT_WEIGHTS
-    comps = _components(f)
+    comps = directional_components(f)
     total_w = sum(weights.get(k, 0) for k in comps)
     if total_w <= 0:
         return ScoreResult(0.0, 0, comps, (Reason(False, "No usable market data yet"),))
@@ -113,7 +85,7 @@ def _direction_reasons(c: dict[str, float], sign: int, f: dict[str, float | None
             r.append(Reason(False, "Momentum weak"))
         else:
             r.append(Reason(False, "Momentum against signal"))
-    b = c.get("book")
+    b = c.get("orderbook")
     if b is not None:
         if b * sign >= 0.2:
             r.append(Reason(True, f"{'Buyers' if up else 'Sellers'} dominating order book"))
@@ -127,7 +99,7 @@ def _direction_reasons(c: dict[str, float], sign: int, f: dict[str, float | None
             r.append(Reason(True, f"Market probability trending {'upward' if up else 'downward'}"))
         elif t * sign <= -0.2:
             r.append(Reason(False, "Trend disagrees"))
-    fl = c.get("flow")
+    fl = c.get("volume")
     if fl is not None and fl * sign >= 0.3:
         r.append(Reason(True, f"Recent trades favour {'YES' if up else 'NO'}"))
     u = c.get("underlying")

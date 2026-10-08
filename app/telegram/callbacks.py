@@ -5,6 +5,7 @@ Transport-agnostic (no python-telegram-bot imports) so it is unit-testable.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
@@ -13,6 +14,7 @@ from dataclasses import dataclass
 from app.errors import ConfigError, InvalidCallbackError, TradingError
 from app.risk.profiles import RiskLevel
 from app.runtime import BotRuntime
+from app.telegram import analytics_views as AV
 from app.telegram import messages as M
 from app.telegram.keyboards import Screen
 from app.utils.logging import log_event
@@ -29,6 +31,8 @@ ACTIONS: dict[str, tuple[int, ...]] = {
     "trades": (0, 1), "pos": (0,), "pcl": (1,), "pclok": (1,), "risk": (0,), "rset": (1,), "rok": (1,),
     "rcust": (0,), "radj": (2,), "rrst": (0,), "hist": (1,), "strat": (0,), "ind": (0,), "cfg": (0,),
     "assets": (0,), "focus": (1,), "possz": (0,), "auto": (0, 1), "mode": (0, 1), "modeok": (1,),
+    "why": (1,), "chk": (1,), "anl": (0,), "anld": (0,), "cal": (0,), "loss": (0,), "wins": (0,),
+    "exp": (0,), "filt": (0,), "feat": (0,),
     "clear": (0,), "estop": (0,), "estopok": (0,), "ereset": (0,), "eresetok": (0,), "pnl": (0,),
 }
 
@@ -125,6 +129,36 @@ class CallbackRouter:
 
     async def _on_det(self, uid: int, t: str) -> Response:
         return Response(M.signal_details(self.rt, self._ticker(t)))
+
+    async def _on_why(self, uid: int, t: str) -> Response:
+        return Response(AV.why(self.rt, self._ticker(t)))
+
+    async def _on_chk(self, uid: int, t: str) -> Response:
+        return Response(AV.checklist(self.rt, self._ticker(t)))
+
+    async def _on_anl(self, uid: int) -> Response:
+        return Response(await asyncio.to_thread(AV.analytics, self.rt))
+
+    async def _on_anld(self, uid: int) -> Response:
+        return Response(AV.detailed(self.rt))
+
+    async def _on_cal(self, uid: int) -> Response:
+        return Response(AV.calibration(self.rt))
+
+    async def _on_loss(self, uid: int) -> Response:
+        return Response(AV.loss_analysis(self.rt))
+
+    async def _on_wins(self, uid: int) -> Response:
+        return Response(AV.win_analysis(self.rt))
+
+    async def _on_exp(self, uid: int) -> Response:
+        return Response(await asyncio.to_thread(AV.experiments, self.rt))
+
+    async def _on_filt(self, uid: int) -> Response:
+        return Response(await asyncio.to_thread(AV.filters, self.rt))
+
+    async def _on_feat(self, uid: int) -> Response:
+        return Response(await asyncio.to_thread(AV.features, self.rt))
 
     async def _on_trades(self, uid: int, page: str = "0") -> Response:
         p = int(page) if page.isdigit() else 0

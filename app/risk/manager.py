@@ -5,10 +5,12 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
 
 from app.kalshi.market_data import MarketSnapshot
 from app.risk.profiles import RiskLevel, RiskProfile
 from app.risk.sizing import PositionSizer
+from app.strategy.quality import NO_TRADE
 from app.strategy.signals import SignalResult, Validity
 from app.utils.logging import log_event
 from app.utils.time import utcnow
@@ -32,6 +34,22 @@ class RiskContext:
     daily_realized_pnl: float
     last_loss_at: datetime | None = None
     last_trade_at: dict[str, datetime] = field(default_factory=dict)
+    adaptive_mode: str = "NORMAL"  # NORMAL | CAUTION | PAUSED
+    adaptive_reason: str = ""
+
+
+@dataclass(frozen=True)
+class CheckItem:
+    label: str
+    value: str
+    ok: bool
+    critical: bool = True
+
+    @property
+    def mark(self) -> str:
+        if self.ok:
+            return "✓"
+        return "✗" if self.critical else "⚠️"
 
 
 @dataclass(frozen=True)
@@ -47,6 +65,9 @@ class RiskDecision:
     fee_usd: float = 0.0
     failures: tuple[str, ...] = ()
     timestamp: datetime = field(default_factory=utcnow)
+    checklist: tuple[CheckItem, ...] = ()
+    estimate: Any = None  # research.calibration.HistEstimate | None
+    warnings: tuple[str, ...] = ()
 
     @property
     def total_usd(self) -> float:
@@ -54,7 +75,9 @@ class RiskDecision:
 
 
 class RiskManager:
-    def __init__(self, sizer: PositionSizer, stale_after_sec: float = 30.0, price_buffer_cents: float = 2.0) -> None:
+    def __init__(self, sizer: PositionSizer, stale_after_sec: float = 30.0, price_buffer_cents: float = 2.0,
+                 ev_gate: str = "lower") -> None:
+        self.ev_gate = ev_gate
         self.sizer = sizer
         self.stale_after_sec = stale_after_sec
         self.price_buffer_cents = price_buffer_cents
@@ -66,9 +89,11 @@ class RiskManager:
         profile: RiskProfile,
         ctx: RiskContext,
         now: datetime | None = None,
+        estimate: Any = None,
     ) -> RiskDecision:
         now = now or utcnow()
         fails: list[str] = []
+        warnings: list[str] = []
         lvl = profile.level.title
 
         if not ctx.trading_enabled:
@@ -129,6 +154,52 @@ class RiskManager:
         if last and (now - last).total_seconds() < profile.trade_cooldown_sec:
             fails.append("Recent trade cooldown on this market")
 
+        # ---------------- setup-quality gates (signal quality, no-trade filter, EV)
+        a = signal.analysis
+        checks: list[CheckItem] = []
+        if a is None:
+            fails.append("No setup analysis available")
+        else:
+            min_q = profile.min_signal_quality
+            grades = profile.grades
+            if ctx.adaptive_mode == "CAUTION":
+                min_q += 5
+                grades = grades & {"A+", "A"}
+                warnings.append(f"Caution mode: {ctx.adaptive_reason}")
+            if ctx.adaptive_mode == "PAUSED":
+                fails.append(f"Trading paused: {ctx.adaptive_reason}")
+            if a.hard_flags:
+                fails.append(f"No-trade filter: {a.reasons[0]}")
+            if a.quality < min_q:
+                fails.append(f"Signal quality {a.quality} below {lvl} minimum ({min_q})")
+            if a.grade == NO_TRADE or a.grade not in grades:
+                fails.append(f"Setup grade {a.grade} not allowed for {lvl}")
+            if len(a.soft_flags) > profile.max_soft_flags:
+                fails.append(f"Too many warnings for {lvl}: " + ", ".join(a.reasons[len(a.hard_flags):]))
+            stab = a.stability.score
+            if stab is None or stab < profile.min_stability:
+                fails.append(f"Signal stability {stab if stab is not None else 'n/a'} below {profile.min_stability}")
+            ev_ok = True
+            if estimate is not None:
+                for p in estimate.poor:
+                    fails.append(p)
+                if estimate.sufficient:
+                    gate_ev = estimate.ev_low_cents if self.ev_gate == "lower" else estimate.ev_cents
+                    label = "EV lower bound" if self.ev_gate == "lower" else "EV"
+                    if (gate_ev or 0) < profile.min_ev_cents:
+                        ev_ok = False
+                        fails.append(f"Insufficient expected edge ({label} {gate_ev:+.1f}¢ < "
+                                     f"{profile.min_ev_cents:+.1f}¢)")
+                elif profile.require_known_ev or ctx.mode == "live":
+                    ev_ok = False
+                    fails.append("INSUFFICIENT DATA to estimate expected value")
+                else:
+                    warnings.append("INSUFFICIENT DATA - EV unknown (paper only)")
+            elif profile.require_known_ev or ctx.mode == "live":
+                ev_ok = False
+                fails.append("INSUFFICIENT DATA to estimate expected value")
+            checks = _checklist(signal, snap, profile, a, estimate, ev_ok, min_q, grades, ctx)
+
         size = None
         if price is not None:
             limit = min(99.0, price + self.price_buffer_cents)
@@ -156,7 +227,44 @@ class RiskManager:
             fee_usd=size.fee_usd if size and approved else 0.0,
             failures=tuple(fails),
             timestamp=now,
+            checklist=tuple(checks),
+            estimate=estimate,
+            warnings=tuple(warnings),
         )
         log_event(log, "RISK_EVAL", logging.DEBUG, ticker=snap.ticker, profile=lvl, approved=approved,
                   reason=decision.reason)
         return decision
+
+
+def _checklist(sig: SignalResult, snap: MarketSnapshot, p: RiskProfile, a: Any, est: Any, ev_ok: bool,
+               min_q: int, grades: frozenset[str], ctx: RiskContext) -> list[CheckItem]:
+    side = sig.leaning.side
+    liq = snap.ask_liquidity(side) if side else 0.0
+    spread = snap.spread
+    items = [
+        CheckItem("Direction", sig.leaning.value, side is not None),
+        CheckItem("Confidence", f"{sig.confidence}%", sig.confidence >= p.min_confidence),
+        CheckItem("Signal Quality", str(a.quality), a.quality >= min_q),
+        CheckItem("Setup", a.grade, a.grade in grades),
+        CheckItem("Spread", f"{spread:.0f}¢" if spread is not None else "n/a",
+                  spread is not None and spread <= p.max_spread_cents),
+        CheckItem("Liquidity", f"{liq:.0f}", liq >= p.min_liquidity_contracts),
+        CheckItem("Time", f"{int(snap.time_remaining() // 60):02d}:{int(snap.time_remaining() % 60):02d}",
+                  snap.time_remaining() >= p.min_time_remaining_sec),
+        CheckItem("Regime", a.regime.value.replace("_", " "),
+                  a.regime.value in ("STRONG_TREND", "MODERATE_TREND")),
+        CheckItem("Momentum", a.accel_state.title(), a.accel_state != "DECELERATING", critical=False),
+        CheckItem("Underlying", a.underlying_state.title(), a.underlying_state != "CONFLICT",
+                  critical=a.underlying_state == "CONFLICT"),
+        CheckItem("Stability", f"{a.stability.score:.2f}" if a.stability.score is not None else "n/a",
+                  a.stability.score is not None and a.stability.score >= p.min_stability),
+        CheckItem("No-trade filter", "clear" if not a.hard_flags else a.reasons[0], not a.hard_flags),
+    ]
+    if est is not None and est.sufficient:
+        items.append(CheckItem("Historical Setup", f"{est.win_rate:.0%} (n={est.n_markets})", not est.poor))
+        items.append(CheckItem("Expected Value", f"{est.ev_cents:+.1f}¢/contract", ev_ok))
+    else:
+        items.append(CheckItem("Historical Setup", "⚠️ INSUFFICIENT DATA", ev_ok, critical=not ev_ok))
+        items.append(CheckItem("Expected Value", "unknown", ev_ok, critical=not ev_ok))
+    items.append(CheckItem("Market mode", ctx.adaptive_mode.title(), ctx.adaptive_mode != "PAUSED"))
+    return items

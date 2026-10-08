@@ -2,6 +2,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from app.risk.profiles import RiskLevel
+
 from app.errors import DuplicateOrderError, LiveTradingDisabledError, OrderRejectedError, TradingDisabledError
 from app.kalshi.execution import build_entry_order
 from app.trading.live import LiveExecutor
@@ -56,7 +58,7 @@ async def test_paper_mode_never_invokes_live_execution(runtime):
     runtime.live.buy = AsyncMock()
     runtime.executor.live = runtime.live
     runtime.client.create_order_v2 = AsyncMock()
-    runtime.store.update(running=True)
+    runtime.store.update(running=True, risk_level=RiskLevel.HIGH)
     info = make_info()
     feed_history(runtime, info, "up")
     t, view = runtime.propose(info.ticker)
@@ -106,7 +108,7 @@ def test_build_entry_order_yes_side():
 
 
 async def test_duplicate_trade_prevention(runtime):
-    runtime.store.update(running=True)
+    runtime.store.update(running=True, risk_level=RiskLevel.HIGH)
     info = make_info()
     feed_history(runtime, info, "up")
     t, _ = runtime.propose(info.ticker)
@@ -129,7 +131,7 @@ def test_ticket_store_expiry():
 
 
 async def test_emergency_stop_blocks_orders(runtime):
-    runtime.store.update(running=True)
+    runtime.store.update(running=True, risk_level=RiskLevel.HIGH)
     info = make_info()
     feed_history(runtime, info, "up")
     t, _ = runtime.propose(info.ticker)
@@ -144,7 +146,7 @@ async def test_emergency_stop_blocks_orders(runtime):
 
 
 async def test_settlement_waits_for_real_result(runtime, monkeypatch):
-    runtime.store.update(running=True)
+    runtime.store.update(running=True, risk_level=RiskLevel.HIGH)
     info = make_info()
     feed_history(runtime, info, "up")
     t, _ = runtime.propose(info.ticker)

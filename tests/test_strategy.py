@@ -65,11 +65,27 @@ def test_flip_detection():
         snap = make_snapshot("BTC", "down", ts, info=info, ts=ts)
         down = engine.evaluate(snap, threshold=60, now=ts)
     flip = engine.detect_flip(down)
-    assert down.direction is Direction.DOWN
-    assert flip is not None and flip.previous.direction is Direction.UP
+    assert down.leaning is Direction.DOWN
+    assert flip is not None and flip.previous.leaning is Direction.UP
+    # A late, extended move is graded NO TRADE even though it leans DOWN.
+    assert down.direction is Direction.WAIT and "extended_move" in down.analysis.hard_flags
 
 
 def test_underlying_unavailable_is_not_fabricated():
     _, r = run("up")
     assert r.features["spot"] is None and r.features["strike_dist_pct"] is None
     assert "underlying" not in r.components
+
+
+def test_fast_updates_do_not_freeze_history():
+    """Regression: sub-spacing updates must not keep overwriting a single sample."""
+    engine = SignalEngine()
+    info = make_info()
+    now = utcnow()
+    for i in range(100):  # ten updates per second for 10s
+        ts = now + timedelta(milliseconds=100 * i)
+        engine.record(make_snapshot("BTC", "up", ts, info=info, ts=ts))
+    assert len(engine.history(info.ticker)) >= 5
+    for i in range(30):
+        engine.stability.record(info.ticker, now + timedelta(seconds=5 * i), "UP", 80)
+    assert len(engine.stability.history(info.ticker)) >= 10

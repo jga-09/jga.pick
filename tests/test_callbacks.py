@@ -12,7 +12,7 @@ def router(runtime):
 
 
 async def test_unauthorized_user_cannot_trade(runtime, router):
-    runtime.store.update(running=True)
+    runtime.store.update(running=True, risk_level=RiskLevel.HIGH)
     info = make_info()
     feed_history(runtime, info, "up")
     resp = await router.handle(999, f"buy:{info.ticker}")
@@ -22,9 +22,9 @@ async def test_unauthorized_user_cannot_trade(runtime, router):
     assert "Unauthorized" in resp.toast
     assert runtime.tickets.get(t.id) is not None  # not consumed by the intruder
     assert not runtime.portfolio.open_positions()
-    for action in ("start", "estopok", "rok:high", "mode:live", "auto:on"):
+    for action in ("start", "estopok", "rok:low", "mode:live", "auto:on"):
         assert "Unauthorized" in (await router.handle(None, action)).toast
-    assert runtime.state.risk_level is RiskLevel.LOW and not runtime.state.emergency_stop
+    assert runtime.state.risk_level is RiskLevel.HIGH and not runtime.state.emergency_stop
 
 
 async def test_risk_change_requires_confirmation(runtime, router):
@@ -40,7 +40,7 @@ async def test_risk_change_requires_confirmation(runtime, router):
 
 async def test_admin_paper_trade_flow(runtime, router):
     await router.handle(ADMIN_ID, "resume")
-    runtime.store.update(running=True)
+    runtime.store.update(running=True, risk_level=RiskLevel.HIGH)
     info = make_info()
     feed_history(runtime, info, "up")
     resp = await router.handle(ADMIN_ID, f"buy:{info.ticker}")
@@ -102,12 +102,13 @@ async def test_risk_customize_respects_hard_limits(runtime, router):
 
 
 async def test_all_screens_render(runtime, router):
-    runtime.store.update(running=True)
+    runtime.store.update(running=True, risk_level=RiskLevel.HIGH)
     info = make_info()
     feed_history(runtime, info, "up")
     for route in ("home", "status", "signals", f"mkt:{info.ticker}", f"det:{info.ticker}", "trades:0", "pos",
                   "risk", "rcust", "hist:7d", "strat", "ind", "cfg", "assets", "possz", "auto", "mode",
-                  "estop", "pnl"):
+                  "estop", "pnl", f"why:{info.ticker}", f"chk:{info.ticker}", "anl", "anld", "cal", "loss",
+                  "wins", "exp", "filt", "feat"):
         resp = await router.handle(ADMIN_ID, route)
         assert resp.screen is not None and resp.screen.text, route
         for row in resp.screen.buttons:

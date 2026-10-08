@@ -5,6 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.strategy.quality import SetupAnalysis
 
 
 class Direction(StrEnum):
@@ -54,6 +58,15 @@ class SignalResult:
     components: dict[str, float] = field(default_factory=dict)
     validity: Validity = Validity.VALID
     threshold: int = 0
+    analysis: SetupAnalysis | None = None
+
+    @property
+    def quality(self) -> int | None:
+        return self.analysis.quality if self.analysis else None
+
+    @property
+    def grade(self) -> str:
+        return self.analysis.grade if self.analysis else "NO_TRADE"
 
     @property
     def recommended_action(self) -> str:
@@ -93,4 +106,4 @@ class SignalResult:
 
     @property
     def book_label(self) -> str:
-        return self._label("book", "Buyers", "Sellers", "Mixed", weak=0.2)
+        return self._label("orderbook", "Buyers", "Sellers", "Mixed", weak=0.2)

@@ -10,7 +10,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any, Protocol
 
@@ -25,6 +25,11 @@ from app.risk.manager import RiskDecision, RiskManager
 from app.risk.profiles import RiskLevel, RiskProfile, load_profiles
 from app.risk.sizing import PositionSizer
 from app.state import BotState, StateStore
+from app.research.adaptive import AdaptiveState, assess
+from app.research.calibration import HistEstimate, HistoricalModel
+from app.research.dataset import from_signal
+from app.research.tradeanalysis import analyze_trade, describe, entry_snapshot, exit_snapshot
+from app.strategy.config import StrategyConfig
 from app.strategy.engine import SignalEngine
 from app.telegram import messages
 from app.strategy.signals import Direction, SignalResult
@@ -85,11 +90,21 @@ class BotRuntime:
 
         self.discovery = MarketDiscovery(client, settings)
         self.market_data = MarketDataService(client, settings.orderbook_depth)
+        self.strategy_config = StrategyConfig.from_settings(settings)
         self.engine = SignalEngine(settings.signal_history_size, settings.signal_min_confidence,
-                                   settings.stale_data_sec, min_history_sec=settings.signal_min_history_sec)
+                                   settings.stale_data_sec, min_history_sec=settings.signal_min_history_sec,
+                                   config=self.strategy_config)
+        self.model = self._build_model()
+        self._model_built = time.time()
+        self.adaptive = AdaptiveState("NORMAL")
+        self._obs_keys: set[tuple[str, int]] = set()
+        self._last_signal: dict[str, SignalResult] = {}  # survives market removal (for exit analysis)
+        from app.telegram.analytics_views import ResearchCache
+
+        self._research = ResearchCache()
         self._strong: dict[str, str] = {}  # ticker -> direction currently alerted as strong
         self.risk = RiskManager(PositionSizer(settings.fee_rate), settings.stale_data_sec,
-                                settings.order_price_tolerance_cents)
+                                settings.order_price_tolerance_cents, ev_gate=settings.ev_gate)
         self.portfolio = Portfolio(repo, settings.paper_starting_balance)
         self.paper = PaperExecutor(self.portfolio, settings.paper_slippage_cents, settings.fee_rate)
         # The live executor is only constructed when configuration permits live trading.
@@ -273,6 +288,69 @@ class BotRuntime:
             "fixture": self.fixture_mode,
         }
 
+    # -------------------------------------------------------------- research
+    def _build_model(self) -> HistoricalModel:
+        return HistoricalModel(
+            self.repo.observations(source="live"), self.settings.hist_min_samples,
+            self.settings.calibration_prior_strength, self.settings.fee_rate, self.settings.paper_slippage_cents,
+        )
+
+    def refresh_model(self) -> HistoricalModel:
+        self.model = self._build_model()
+        self._model_built = time.time()
+        self._research.clear()
+        return self.model
+
+    def research(self, key: str) -> Any:
+        from app.telegram.analytics_views import compute_research
+
+        return self._research.get(key, lambda: compute_research(self, key))
+
+    def estimate_for(self, sig: SignalResult, snap: MarketSnapshot) -> HistEstimate | None:
+        a = sig.analysis
+        side = sig.leaning.side
+        price = snap.entry_price(side) if side else None
+        if a is None or side is None or price is None:
+            return None
+        return self.model.estimate(a.grade, a.regime.value, a.time_bucket, side, price)
+
+    def record_observation(self, sig: SignalResult, snap: MarketSnapshot, now: datetime | None = None) -> bool:
+        now = now or utcnow()
+        obs = from_signal(sig, snap, now)
+        if obs is None or (obs.ticker, obs.minute) in self._obs_keys:
+            return False
+        self._obs_keys.add((obs.ticker, obs.minute))
+        return self.repo.add_observation(obs)
+
+    async def label_observations(self, now: datetime | None = None) -> int:
+        """Attach real market results to observations of closed markets (never guessed)."""
+        now = now or utcnow()
+        labelled = 0
+        for ticker in self.repo.unlabeled_tickers(now - timedelta(seconds=10)):
+            try:
+                raw = await self.client.get_market(ticker)
+            except KalshiError as exc:
+                log_event(log, "LABEL_FAILED", logging.DEBUG, ticker=ticker, error=exc)
+                continue
+            result = str(raw.get("result") or "")
+            if result in ("yes", "no"):
+                labelled += self.repo.label_observations(ticker, result)
+        self._obs_keys = {k for k in self._obs_keys if k[0] in self.discovery.state.by_ticker}
+        return labelled
+
+    def update_adaptive(self) -> AdaptiveState:
+        cur = [s.features["volatility"] for s in self.engine.latest.values()
+               if s.features.get("volatility") is not None and s.validity.value == "VALID"]
+        hist = [o.features["volatility"] for o in self.model.obs if "volatility" in o.features]
+        recent = [(bool(c["won"]), float(c["entry"].get("p_model") or 0.5))
+                  for c in reversed(self.repo.trade_contexts(limit=50))]
+        data_ok = (not self.state.running) or not self.discovery.state.current or self.live_data_ok()
+        new = assess(cur, hist, recent, data_ok, min_recent=20)
+        if new.mode != self.adaptive.mode:
+            log_event(log, "ADAPTIVE_MODE", mode=new.mode, reason=new.reason)
+        self.adaptive = new
+        return new
+
     # ------------------------------------------------------------ risk/trade
     def check_risk(self, sig: SignalResult, snap: MarketSnapshot, now: datetime | None = None) -> RiskDecision:
         st = self.state
@@ -280,13 +358,14 @@ class BotRuntime:
             mode=st.mode, trading_enabled=st.trading_allowed, disabled_reason=st.disabled_reason,
             mode_permitted=self.mode_permitted(),
         )
-        return self.risk.evaluate(sig, snap, self.profile(), ctx, now)
+        ctx = replace(ctx, adaptive_mode=self.adaptive.mode, adaptive_reason=self.adaptive.reason)
+        return self.risk.evaluate(sig, snap, self.profile(), ctx, now, estimate=self.estimate_for(sig, snap))
 
     def make_ticket(self, sig: SignalResult, decision: RiskDecision, snap: MarketSnapshot,
                     origin: str = "manual") -> TradeTicket:
         assert decision.approved and decision.side and decision.limit_price_cents is not None
         return self.tickets.add(TradeTicket(
-            ticker=snap.ticker, label=snap.info.label, side=decision.side, direction=sig.direction.value,
+            ticker=snap.ticker, label=snap.info.label, side=decision.side, direction=sig.leaning.value,
             contracts=decision.position_size, limit_price_cents=decision.limit_price_cents,
             quoted_price_cents=decision.price_cents or decision.limit_price_cents,
             cost_usd=decision.cost_usd, fee_usd=decision.fee_usd, risk_level=decision.risk_level.value,
@@ -305,8 +384,7 @@ class BotRuntime:
     async def _revalidate(self, ticket: TradeTicket) -> tuple[RiskDecision, MarketSnapshot]:
         info = self.discovery.state.by_ticker.get(ticket.ticker)
         snap = await self.market_data.poll(info) if info else self.market_data.latest[ticket.ticker]
-        prof = self.profile()
-        sig = self.engine.evaluate(snap, threshold=prof.min_confidence, threshold_label=prof.level.title)
+        sig = await self.evaluate_snapshot(snap)
         decision = self.check_risk(sig, snap)
         self.repo.add_risk_decision(ticket.ticker, decision)
         log_event(log, "RISK_APPROVED" if decision.approved else "RISK_REJECTED",
@@ -316,6 +394,14 @@ class BotRuntime:
 
     async def execute_ticket(self, ticket: TradeTicket, *, confirmed: bool) -> Position:
         pos = await self.executor.execute(ticket, confirmed=confirmed, revalidate=self._revalidate)
+        sig = self._last_signal.get(pos.ticker)
+        snap = self.market_data.latest.get(pos.ticker)
+        if sig is not None and snap is not None and pos.id is not None:
+            entry = entry_snapshot(sig, snap, utcnow())
+            est = self.estimate_for(sig, snap)
+            entry["p_model"] = est.p_model if est and est.p_model is not None else pos.entry_price / 100
+            entry["ev_cents"] = est.ev_cents if est else None
+            self.repo.save_trade_context(pos.id, pos.ticker, entry=entry)
         self.repo.add_event("TRADE_OPENED", f"{pos.mode} {pos.ticker} {pos.side} x{pos.contracts}@{pos.entry_price}")
         await self.notify("trade_opened", f"open:{pos.id}", messages.trade_opened_alert(pos))
         return pos
@@ -332,7 +418,19 @@ class BotRuntime:
         await self._after_close(pos)
         return pnl
 
+    def _analyze_close(self, pos: Position) -> None:
+        if pos.id is None:
+            return
+        ctx = self.repo.trade_context(pos.id)
+        if ctx is None:
+            return
+        exit_ = exit_snapshot(self._last_signal.get(pos.ticker))
+        tags = analyze_trade(ctx["entry"], exit_, pos.won)
+        self.repo.save_trade_context(pos.id, pos.ticker, exit=exit_, tags=tags, won=pos.won,
+                                     summary=describe(tags, pos.won))
+
     async def _after_close(self, pos: Position) -> None:
+        self._analyze_close(pos)
         await self.notify("trade_closed", f"close:{pos.id}", messages.trade_closed_alert(pos))
         limit = self.settings.large_loss_alert_usd
         if limit > 0 and (pos.realized_pnl or 0) <= -limit:
@@ -353,6 +451,8 @@ class BotRuntime:
         for ticker in before - set(st.by_ticker):
             self.market_data.drop(ticker)
             self.engine.forget(ticker)
+        keep = set(st.by_ticker) | {p.ticker for p in self.portfolio.open_positions()}
+        self._last_signal = {k: v for k, v in self._last_signal.items() if k in keep}
         if self.ws:
             self.ws.set_markets(m.ticker for m in st.current.values())
 
@@ -407,26 +507,35 @@ class BotRuntime:
             await self.poll_once()
             await asyncio.sleep(self.settings.poll_interval_sec)
 
-    async def process_snapshot(self, snap: MarketSnapshot) -> SignalResult:
+    async def evaluate_snapshot(self, snap: MarketSnapshot) -> SignalResult:
+        """The single evaluation path (polling, revalidation before execution)."""
         prof = self.profile()
         spot, spot_hist = None, None
         if self.underlying.name != "none":
             spot = await self.underlying.get_price(snap.info.asset)
             spot_hist = self.underlying.history(snap.info.asset)
-        sig = self.engine.evaluate(snap, threshold=prof.min_confidence, threshold_label=prof.level.title,
-                                   spot=spot, spot_history=spot_hist)
+        sig = self.engine.evaluate(snap, threshold=prof.min_confidence, min_quality=prof.min_signal_quality,
+                                   threshold_label=prof.level.title, spot=spot, spot_history=spot_hist)
+        self._last_signal[snap.ticker] = sig
+        return sig
+
+    async def process_snapshot(self, snap: MarketSnapshot) -> SignalResult:
+        sig = await self.evaluate_snapshot(snap)
         self._persist(snap, sig)
+        self.record_observation(sig, snap)
 
         flip = self.engine.detect_flip(sig)
         if flip:
             await self.notify("flip", f"flip:{snap.ticker}", messages.flip_alert(flip))
         decision = self.check_risk(sig, snap)
-        strong = sig.direction is not Direction.WAIT and sig.confidence >= self.settings.strong_signal_alert_min_confidence
+        strong = (decision.approved and sig.grade in ("A+", "A")
+                  and sig.confidence >= self.settings.strong_signal_alert_min_confidence)
         if strong and self._strong.get(snap.ticker) != sig.direction.value:
             self._strong[snap.ticker] = sig.direction.value
             text, buttons = messages.strong_signal_alert(sig, snap, decision, self.state)
             await self.notify("strong_signal", f"strong:{snap.ticker}:{sig.direction.value}", text, buttons)
-        elif not strong and sig.confidence < self.settings.strong_signal_alert_min_confidence - 5:
+        elif not strong and (sig.grade not in ("A+", "A")
+                             or sig.confidence < self.settings.strong_signal_alert_min_confidence - 5):
             self._strong.pop(snap.ticker, None)  # hysteresis: re-arm only after it clearly weakens
         if self.state.auto_trade and decision.approved:
             await self._auto_trade(sig, snap, decision)
@@ -488,6 +597,10 @@ class BotRuntime:
         while True:
             try:
                 await self.settle_positions()
+                labelled = await self.label_observations()
+                if labelled or time.time() - self._model_built > self.settings.model_refresh_sec:
+                    self.refresh_model()
+                self.update_adaptive()
                 if self.state.mode == "live" and self.live is not None:
                     bal = await self.client.get_balance()
                     self.portfolio.live_balance = float(bal.get("balance", 0)) / 100
@@ -495,7 +608,8 @@ class BotRuntime:
                     self._last_purge = time.time()
                     purged = self.repo.purge(self.settings.snapshot_retention_days,
                                              self.settings.signal_retention_days,
-                                             self.settings.event_retention_days)
+                                             self.settings.event_retention_days,
+                                             self.settings.observation_retention_days)
                     log_event(log, "RETENTION_PURGE", **purged)
             except KalshiError as exc:
                 log_event(log, "MAINTENANCE_FAILED", logging.WARNING, error=exc)

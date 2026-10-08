@@ -74,8 +74,8 @@ def home(rt: BotRuntime) -> Screen:
         status_line = "🚨 EMERGENCY STOP — orders blocked"
     elif view is None:
         status_line = "🔍 Searching for active 15M markets"
-    elif view.signal and view.signal.direction is not Direction.WAIT:
-        status_line = "🟢 Online — signal active"
+    elif view.decision and view.decision.approved:
+        status_line = "🟢 Online — trade setup active"
     else:
         status_line = "🟢 Online — waiting for signal"
 
@@ -92,14 +92,25 @@ def home(rt: BotRuntime) -> Screen:
     ]
     if view and view.signal and view.snapshot:
         sig, snap = view.signal, view.snapshot
+        a = sig.analysis
+        approved = bool(view.decision and view.decision.approved)
+        label = f"{sig.leaning.emoji} {sig.leaning.value}" if approved else "⚪ NO TRADE"
         lines += [
-            f"🎯 Signal: {dir_badge(sig)}",
-            f"Confidence: {sig.confidence}%",
+            f"🎯 Signal: {label}",
+            f"Quality: {a.quality}/100 · {a.grade} · Conf {sig.confidence}%" if a else f"Confidence: {sig.confidence}%",
             f"YES {cents(snap.yes_ask)} · NO {cents(snap.no_ask)}",
             f"⏱ {fmt_countdown(snap.time_remaining())}",
         ]
+        if a:
+            est = view.decision.estimate if view.decision else None
+            ev = f"{est.ev_cents / 100:+.2f}$" if est is not None and est.sufficient else "unknown"
+            lines += [f"📈 {a.regime.badge}", f"💰 EV: {ev} · 📚 n={est.n_markets if est else 0}"]
     else:
         lines += ["🎯 Signal: ⚪ —", "No market data yet" if st.running else "Press 🟢 Start to begin"]
+    best_t = rt.model.best("time")
+    lines += [f"🕐 Best window: {best_t.key.split('/')[1] + ' min' if best_t else 'insufficient data'}"]
+    if rt.adaptive.mode != "NORMAL":
+        lines += [rt.adaptive.badge]
     lines += [
         SEP,
         f"🛡 {st.risk_level.badge} RISK",
@@ -112,6 +123,23 @@ def home(rt: BotRuntime) -> Screen:
 
 
 # ------------------------------------------------------------- signal card
+def _hist_lines(rt: BotRuntime, view: MarketView) -> list[str]:
+    d = view.decision
+    est = d.estimate if d else None
+    if est is not None and est.sufficient:
+        return [f"📚 Similar setups: {est.n_markets:,}",
+                f"📊 Historical WR: {est.win_rate:.0%}",
+                f"💹 Est. edge: {est.edge * 100:+.1f}% · EV {est.ev_cents / 100:+.2f}$/contract"]
+    n = est.n_markets if est else 0
+    return [f"📚 Similar setups: ⚠️ INSUFFICIENT DATA (n={n})", "💹 Est. edge / EV: unknown"]
+
+
+def _time_window(rt: BotRuntime, bucket: str) -> str:
+    best = rt.model.best("time")
+    star = " ⭐" if best is not None and best.key.endswith("/" + bucket) else ""
+    return f"{bucket} min{star}"
+
+
 def signal_card(rt: BotRuntime, ticker: str) -> Screen:
     view = rt.view(ticker)
     if view is None or view.snapshot is None:
@@ -119,38 +147,44 @@ def signal_card(rt: BotRuntime, ticker: str) -> Screen:
                       route=f"mkt:{ticker}")
     sig, snap, decision = view.signal, view.snapshot, view.decision
     prof = rt.profile()
-    lines = [SEP, f"🎯 <b>{escape(view.info.asset)} · {view.info.window_minutes}M</b>", SEP, ""]
-    if sig is None:
-        lines.append("⚪ Collecting data…")
-        return Screen("\n".join(lines), [[("🔄 Refresh", f"mkt:{ticker}"), ("🔙 Back", "signals")]],
+    head = [SEP, f"🎯 <b>{escape(view.info.asset)} · {view.info.window_minutes}M</b>", SEP, ""]
+    if sig is None or sig.analysis is None:
+        return Screen("\n".join([*head, "⚪ Collecting data…"]), [[("🔄 Refresh", f"mkt:{ticker}"), ("🔙 Back", "signals")]],
                       route=f"mkt:{ticker}", refreshable=True)
-    lines += [f"<b>{dir_badge(sig)}</b>", "", f"Confidence: {sig.confidence}%", ""]
-    if sig.direction is Direction.WAIT:
-        neg = [r.text for r in sig.reasons if not r.positive]
-        lines += ["Reason:", escape(neg[-1] if neg else "No clear edge") + ".", ""]
-    lines += [f"YES: {cents(snap.yes_ask)}", f"NO: {cents(snap.no_ask)}", "",
-              f"⏱ {fmt_countdown(snap.time_remaining())} remaining", ""]
-    if sig.direction is Direction.WAIT:
-        lines.append(f"🛡 {prof.level.title} requires: {prof.min_confidence}")
-        buttons: list[Button] = [("📊 Details", f"det:{ticker}"), ("🔄 Refresh", f"mkt:{ticker}"),
-                                 ("🔙 Back", "signals")]
+    a = sig.analysis
+    approved = bool(decision and decision.approved)
+    remaining = f"⏱ {fmt_countdown(snap.time_remaining())} remaining · {_time_window(rt, a.time_bucket)}"
+    if not approved:
+        # ⚪ NO TRADE card: show the lean, both scores and exactly why it is rejected.
+        reasons = list(dict.fromkeys([*a.reasons, *(decision.failures if decision else ())]))
+        lean = f"{sig.leaning.emoji} {sig.leaning.value}" if sig.leaning is not Direction.WAIT else "⚪ none"
+        lines = [*head, "<b>⚪ NO TRADE</b>", "", f"Signal: {lean}", f"Raw Confidence: {sig.confidence}%",
+                 f"Signal Quality: {a.quality}/100 · {a.grade}", "",
+                 f"YES: {cents(snap.yes_ask)} · NO: {cents(snap.no_ask)}", remaining,
+                 f"📈 Regime: {a.regime.badge}", "", "Decision:", "❌ REJECTED", "", "Reasons:",
+                 *[f"• {escape(r)}" for r in reasons[:6]]]
+        buttons: list[Button] = [("🧠 Why?", f"why:{ticker}"), ("📋 Checklist", f"chk:{ticker}"),
+                                 ("🔄 Refresh", f"mkt:{ticker}"), ("🔙 Back", "signals")]
         return Screen("\n".join(lines), grid(buttons), route=f"mkt:{ticker}", refreshable=True)
 
-    lines += [
-        f"Momentum: {sig.momentum_label}",
-        f"Trend: {sig.trend_label}",
-        f"Book: {sig.book_label}",
-        f"Spread: {cents(snap.spread)}",
-        "",
-        f"🛡 Risk: {prof.level.title}",
-        "",
-        "Decision:",
-        "✅ TRADE ALLOWED" if decision and decision.approved else f"❌ {escape(decision.reason if decision else 'n/a')}",
+    lines = [
+        *head, f"<b>{sig.leaning.emoji} {sig.leaning.value}</b>", "",
+        f"Signal Quality: {a.quality}/100 · {a.grade}",
+        f"Confidence: {sig.confidence}%", "",
+        f"YES: {cents(snap.yes_ask)} · NO: {cents(snap.no_ask)}", remaining, "",
+        f"📈 Regime: {a.regime.badge}",
+        f"⚡ Momentum: {sig.momentum_label} · {a.accel_state.title()}",
+        f"🔗 Underlying: {a.underlying_state.title()}" + (" ⚠️ DIVERGENCE" if a.divergence else ""),
+        f"Book: {sig.book_label} · Spread: {cents(snap.spread)}",
+        *_hist_lines(rt, view), "",
+        f"🛡 Risk: {prof.level.badge}", "", "Decision:", "✅ TRADE APPROVED",
+        *[f"⚠️ {escape(w)}" for w in decision.warnings],  # type: ignore[union-attr]
     ]
     buttons = []
-    if decision and decision.approved and sig.direction.side:
-        buttons.append((f"💰 BUY {sig.direction.side.upper()}", f"buy:{ticker}"))
-    buttons += [("📊 Details", f"det:{ticker}"), ("❌ Pass", "signals"), ("🔙 Back", "home")]
+    if decision and decision.side:
+        buttons.append((f"💰 BUY {decision.side.upper()}", f"buy:{ticker}"))
+    buttons += [("🧠 Why?", f"why:{ticker}"), ("📋 Checklist", f"chk:{ticker}"), ("📊 Details", f"det:{ticker}"),
+                ("❌ Pass", "signals"), ("🔙 Back", "home")]
     return Screen("\n".join(lines), grid(buttons), route=f"mkt:{ticker}", refreshable=True)
 
 
@@ -201,8 +235,11 @@ def markets_list(rt: BotRuntime) -> Screen:
         sig = v.signal
         conf = f" · {sig.confidence}%" if sig else ""
         remaining = fmt_countdown(v.info.time_remaining())
-        lines += [market_line(v), f"{dir_badge(sig)}{conf}", f"⏱ {remaining}", ""]
-        buttons.append((f"{v.info.icon} {v.info.asset} · {dir_badge(sig)}", f"mkt:{v.info.ticker}"))
+        ok = bool(v.decision and v.decision.approved and sig)
+        badge = f"{sig.leaning.emoji} {sig.leaning.value}" if ok and sig else "⚪ NO TRADE"
+        q = f" · Q{sig.analysis.quality}" if sig and sig.analysis else ""
+        lines += [market_line(v), f"{badge}{conf}{q}", f"⏱ {remaining}", ""]
+        buttons.append((f"{v.info.icon} {v.info.asset} · {badge}", f"mkt:{v.info.ticker}"))
     buttons += [("🔄 Refresh", "signals"), BACK]
     return Screen("\n".join(lines).rstrip(), grid(buttons), route="signals", refreshable=True)
 
@@ -263,6 +300,8 @@ def profile_params(p: RiskProfile) -> list[str]:
         f"Daily Loss Limit: ${p.max_daily_loss_usd:g}",
         f"Min Time: {p.min_time_remaining_sec} sec",
         f"Max Spread: {p.max_spread_cents:g}¢",
+        f"Signal Quality: ≥ {p.min_signal_quality}",
+        f"Setups: {p.allowed_grades}",
     ]
 
 
@@ -299,6 +338,7 @@ RISK_FIELDS: dict[str, tuple[str, str, float]] = {
     "loss": ("max_daily_loss_usd", "Daily Loss $", 5),
     "time": ("min_time_remaining_sec", "Min Time s", 30),
     "spr": ("max_spread_cents", "Max Spread ¢", 1),
+    "qual": ("min_signal_quality", "Quality", 5),
 }
 
 
@@ -417,12 +457,15 @@ def strategy(rt: BotRuntime) -> Screen:
         "🧠 <b>STRATEGY</b>", "",
         "Type:", "Directional", "",
         "Market:", f"{rt.settings.market_duration_minutes} MIN", "",
-        "Signal Model:", "Momentum + Order Book + Market Trend" + (" + Spot" if und != "none" else ""), "",
+        "Signal Model:", "Multi-factor confirmation (10 components)" + (" + Spot" if und != "none" else ""), "",
         "Minimum Confidence:", str(p.min_confidence), "",
+        "Minimum Signal Quality:", str(p.min_signal_quality), "",
+        "Allowed Setups:", p.allowed_grades, "",
         "Risk:", st.risk_level.title, "",
         "Auto Trade:", "ON" if st.auto_trade else "OFF",
     ]
-    return Screen("\n".join(lines), [[("📊 Indicators", "ind"), ("⚙️ Settings", "cfg")], [BACK]], route="strat")
+    return Screen("\n".join(lines), [[("📈 Analytics", "anl"), ("📊 Indicators", "ind")],
+                                      [("⚙️ Settings", "cfg"), BACK]], route="strat")
 
 
 def indicators(rt: BotRuntime) -> Screen:
@@ -430,12 +473,13 @@ def indicators(rt: BotRuntime) -> Screen:
 
     und = rt.underlying.name
     desc = {
-        "momentum": "Δ YES mid 60s + acceleration",
+        "momentum": "Δ YES mid over 60s",
         "trend": "EMA(5/20) + regression slope",
-        "book": "YES vs NO bid depth (±10¢)",
-        "flow": "Taker YES vs NO volume (2m)",
-        "level": "Market-implied probability",
-        "underlying": f"Spot vs strike ({und})" if und != "none" else "Spot feed: not configured",
+        "orderbook": "YES vs NO bid depth, near-touch depth, imbalance change",
+        "volume": "Aggressive taker flow × volume intensity",
+        "prob_move": "Market probability move over 5 min",
+        "underlying": f"Spot vs strike + spot momentum ({und})" if und != "none" else "Spot feed: not configured",
+        "acceleration": "60s slope vs prior 2 min slope",
     }
     lines = ["📊 <b>INDICATORS</b>", ""]
     for k, w in DEFAULT_WEIGHTS.items():
@@ -619,7 +663,8 @@ def pnl(rt: BotRuntime) -> Screen:
 def strong_signal_alert(sig: SignalResult, snap: MarketSnapshot, decision: RiskDecision,
                         st: BotState) -> tuple[str, list[list[Button]]]:
     text = "\n".join([
-        "🚨 <b>STRONG SIGNAL</b>", "", escape(snap.info.label), "", dir_badge(sig), f"Confidence: {sig.confidence}%",
+        "🚨 <b>STRONG SETUP</b>", "", escape(snap.info.label), "", f"{sig.leaning.emoji} {sig.leaning.value}",
+        f"Signal Quality: {sig.quality}/100 · {sig.grade}", f"Confidence: {sig.confidence}%",
         "", f"YES: {cents(snap.yes_ask)}", f"NO: {cents(snap.no_ask)}", "",
         "Time:", fmt_countdown(snap.time_remaining()), "", "Risk:", st.risk_level.badge, "",
         "Status:", "✅ Trade allowed" if decision.approved else f"❌ {escape(decision.reason)}",
@@ -635,7 +680,8 @@ def flip_alert(flip: SignalFlip) -> str:
     p, c = flip.previous, flip.current
     neg = [r.text for r in c.reasons if r.positive]
     reason = "Momentum reversal" if c.components.get("momentum", 0) * p.score < 0 else (neg[0] if neg else "Signal change")
-    return "\n".join(["⚠️ <b>SIGNAL FLIP</b>", "", escape(flip.label), "", dir_badge(p), "→", dir_badge(c), "",
+    return "\n".join(["⚠️ <b>SIGNAL FLIP</b>", "", escape(flip.label), "",
+                      f"{p.leaning.emoji} {p.leaning.value}", "→", f"{c.leaning.emoji} {c.leaning.value}", "",
                       "Previous:", f"{p.confidence}%", "", "New:", f"{c.confidence}%", "", "Reason:", escape(reason)])
 
 

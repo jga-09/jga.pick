@@ -14,6 +14,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.database.db import SCHEMA_VERSION, Database
 from app.database.models import (
     BotEventRow,
+    ObservationRow,
+    TradeContextRow,
     DailyPnlRow,
     LiveOrderRow,
     MarketRow,
@@ -210,6 +212,88 @@ class Repository:
         with self.db.session() as s:
             return s.get(DailyPnlRow, (day or day_key(), mode))
 
+    # -------------------------------------------------------- observations
+    def add_observation(self, obs: Any) -> bool:
+        """Insert unless this (ticker, minute, source) is already recorded."""
+        with self.db.session() as s:
+            exists = s.scalar(select(ObservationRow.id).where(
+                ObservationRow.ticker == obs.ticker, ObservationRow.minute == obs.minute,
+                ObservationRow.source == obs.source))
+            if exists:
+                return False
+            s.add(ObservationRow(**obs.to_row()))
+            return True
+
+    def add_observations(self, observations: list[Any]) -> None:
+        with self.db.session() as s:
+            s.add_all([ObservationRow(**o.to_row()) for o in observations])
+
+    def unlabeled_tickers(self, before: datetime, limit: int = 20) -> list[str]:
+        with self.db.session() as s:
+            q = (select(ObservationRow.ticker).where(ObservationRow.outcome.is_(None),
+                                                     ObservationRow.close_time < before)
+                 .group_by(ObservationRow.ticker).limit(limit))
+            return list(s.scalars(q))
+
+    def label_observations(self, ticker: str, outcome: str) -> int:
+        with self.db.session() as s:
+            rows = s.scalars(select(ObservationRow).where(ObservationRow.ticker == ticker,
+                                                          ObservationRow.outcome.is_(None))).all()
+            for r in rows:
+                r.outcome = outcome
+            return len(rows)
+
+    def observations(self, *, source: str | None = "live", settled_only: bool = True,
+                     since: datetime | None = None) -> list[Any]:
+        from app.research.dataset import Observation
+
+        with self.db.session() as s:
+            q = select(ObservationRow)
+            if source:
+                q = q.where(ObservationRow.source == source)
+            if settled_only:
+                q = q.where(ObservationRow.outcome.is_not(None))
+            if since:
+                q = q.where(ObservationRow.ts >= since)
+            return [Observation.from_row(r) for r in s.scalars(q.order_by(ObservationRow.ts))]
+
+    def count_observations(self, source: str = "live") -> tuple[int, int]:
+        """(total, settled)"""
+        with self.db.session() as s:
+            total = s.scalar(select(func.count(ObservationRow.id)).where(ObservationRow.source == source)) or 0
+            settled = s.scalar(select(func.count(ObservationRow.id)).where(
+                ObservationRow.source == source, ObservationRow.outcome.is_not(None))) or 0
+            return int(total), int(settled)
+
+    # ------------------------------------------------------- trade context
+    def save_trade_context(self, position_id: int, ticker: str, **kw: Any) -> None:
+        for k in ("entry", "exit", "tags"):
+            if k in kw and not isinstance(kw[k], str):
+                kw[k] = json.dumps(kw[k])
+        with self.db.session() as s:
+            row = s.get(TradeContextRow, position_id)
+            if row is None:
+                row = TradeContextRow(position_id=position_id, ticker=ticker)
+                s.add(row)
+            for k, v in kw.items():
+                setattr(row, k, v)
+
+    def trade_contexts(self, limit: int = 500) -> list[dict[str, Any]]:
+        with self.db.session() as s:
+            rows = s.scalars(select(TradeContextRow).where(TradeContextRow.won.is_not(None))
+                             .order_by(TradeContextRow.updated_at.desc()).limit(limit))
+            return [{"position_id": r.position_id, "ticker": r.ticker, "entry": json.loads(r.entry),
+                     "exit": json.loads(r.exit), "tags": json.loads(r.tags), "won": r.won,
+                     "summary": r.summary, "ts": r.updated_at} for r in rows]
+
+    def trade_context(self, position_id: int) -> dict[str, Any] | None:
+        with self.db.session() as s:
+            r = s.get(TradeContextRow, position_id)
+            if r is None:
+                return None
+            return {"entry": json.loads(r.entry), "exit": json.loads(r.exit), "tags": json.loads(r.tags),
+                    "won": r.won, "summary": r.summary}
+
     # -------------------------------------------------------------- events
     def add_event(self, event: str, details: str = "", level: str = "INFO") -> None:
         try:
@@ -219,7 +303,8 @@ class Repository:
             log.exception("EVENT_PERSIST_FAILED event=%s", event)
 
     # ----------------------------------------------------------- retention
-    def purge(self, snapshot_days: int, signal_days: int, event_days: int) -> dict[str, int]:
+    def purge(self, snapshot_days: int, signal_days: int, event_days: int,
+              observation_days: int = 365) -> dict[str, int]:
         now = utcnow()
         out: dict[str, int] = {}
         with self.db.session() as s:
@@ -228,6 +313,7 @@ class Repository:
                 ("signals", SignalRow, SignalRow.ts, signal_days),
                 ("risk_decisions", RiskDecisionRow, RiskDecisionRow.ts, signal_days),
                 ("events", BotEventRow, BotEventRow.ts, event_days),
+                ("observations", ObservationRow, ObservationRow.ts, observation_days),
             ):
                 res = s.execute(delete(model).where(col < now - timedelta(days=days)))
                 out[name] = res.rowcount or 0
