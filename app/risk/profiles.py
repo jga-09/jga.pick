@@ -135,7 +135,7 @@ DEFAULT_PROFILES: dict[RiskLevel, dict[str, Any]] = {
         min_liquidity_contracts=10, loss_cooldown_sec=600, trade_cooldown_sec=120,
         min_entry_price_cents=8, max_entry_price_cents=90, max_balance_fraction=0.05,
         min_signal_quality=75, allowed_grades="A+,A,B", min_stability=0.6, max_soft_flags=1,
-        min_ev_cents=2.0, require_known_ev=False,
+        min_ev_cents=2.0, require_known_ev=True,
     ),
     RiskLevel.HIGH: dict(
         min_confidence=60, max_position_usd=30, max_open_positions=3, max_daily_loss_usd=60,

@@ -189,9 +189,10 @@ def test_expected_value_gate(rm):
     assert not d.approved and "Insufficient expected edge" in d.reason
     unknown = est(sufficient=False)
     assert not rm.evaluate(sig(), snap, PROFILES[RiskLevel.LOW], ctx(), estimate=unknown).approved
-    paper = rm.evaluate(sig(), snap, PROFILES[RiskLevel.MEDIUM], ctx(), estimate=unknown)
+    assert not rm.evaluate(sig(), snap, PROFILES[RiskLevel.MEDIUM], ctx(), estimate=unknown).approved
+    paper = rm.evaluate(sig(), snap, PROFILES[RiskLevel.HIGH], ctx(), estimate=unknown)
     assert paper.approved and any("INSUFFICIENT DATA" in w for w in paper.warnings)
-    live = rm.evaluate(sig(), snap, PROFILES[RiskLevel.MEDIUM], ctx(mode="live"), estimate=unknown)
+    live = rm.evaluate(sig(), snap, PROFILES[RiskLevel.HIGH], ctx(mode="live"), estimate=unknown)
     assert not live.approved  # live always requires a supported EV estimate
 
 
