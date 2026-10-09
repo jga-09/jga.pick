@@ -133,7 +133,7 @@ STRATEGIES: list[Strategy] = [
     Strategy("V1", "Momentum only", _v1),
     Strategy("V2", "Momentum + Trend", _v2),
     Strategy("V3", "Momentum + Trend + Order book", _v3),
-    Strategy("V4", "V3 + Underlying", _v4),
+    Strategy("V4", "Confirm: momentum + trend + order book + underlying agree", _v4),
     Strategy("V5", "Full confirmation (grade ≥ B)", _v5),
     Strategy("V6", "V5 + regime/time/price filter + EV gate (fit on past only)", _v6, _fit_v6),
 ]
