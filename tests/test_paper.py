@@ -158,3 +158,19 @@ async def test_settlement_waits_for_real_result(runtime, monkeypatch):
     runtime.client.get_market = AsyncMock(return_value={"status": "finalized", "result": "yes"})
     assert len(await runtime.settle_positions(now=later)) == 1
     assert not pos.is_open and pos.realized_pnl > 0
+
+
+async def test_reset_paper_keeps_research_data(runtime):
+    runtime.store.update(running=True, risk_level=RiskLevel.HIGH)
+    info = make_info()
+    sig = feed_history(runtime, info, "up")
+    runtime.record_observation(sig, runtime.market_data.latest[info.ticker])
+    t, _ = runtime.propose(info.ticker)
+    pos = await runtime.execute_ticket(runtime.tickets.consume(t.id), confirmed=True)
+    runtime.paper.settle(pos, "yes")
+    assert runtime.repo.count_closed("paper") == 1
+    counts = runtime.repo.reset_paper()
+    assert counts["positions"] == 1 and counts["trades"] == 2
+    assert runtime.repo.count_closed("paper") == 0 and runtime.repo.daily("paper") is None
+    assert runtime.repo.count_observations() == (1, 0)  # research data untouched
+    assert Portfolio(runtime.repo, 1000).paper_balance() == 1000

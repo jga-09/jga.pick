@@ -294,6 +294,25 @@ class Repository:
             return {"entry": json.loads(r.entry), "exit": json.loads(r.exit), "tags": json.loads(r.tags),
                     "won": r.won, "summary": r.summary}
 
+    # ---------------------------------------------------------- paper reset
+    def reset_paper(self) -> dict[str, int]:
+        """Delete all PAPER trading history (positions, trades, orders, daily P&L, trade notes).
+
+        Research data (observations, signals, snapshots) and settings are kept.
+        """
+        with self.db.session() as s:
+            ids = list(s.scalars(select(PositionRow.id).where(PositionRow.mode == "paper")))
+            out = {
+                "positions": len(ids),
+                "trades": s.execute(delete(TradeRow).where(TradeRow.mode == "paper")).rowcount or 0,
+                "paper_orders": s.execute(delete(PaperOrderRow)).rowcount or 0,
+                "daily_pnl": s.execute(delete(DailyPnlRow).where(DailyPnlRow.mode == "paper")).rowcount or 0,
+                "trade_notes": s.execute(delete(TradeContextRow).where(
+                    TradeContextRow.position_id.in_(ids))).rowcount or 0 if ids else 0,
+            }
+            s.execute(delete(PositionRow).where(PositionRow.mode == "paper"))
+        return out
+
     # -------------------------------------------------------------- events
     def add_event(self, event: str, details: str = "", level: str = "INFO") -> None:
         try:
