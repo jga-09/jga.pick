@@ -54,6 +54,7 @@ async def download_and_replay(s: Settings, days: int, assets: list[str], db: Rep
     dl = HistoryDownloader(client, ROOT / "data" / "replay_cache")
     spot = CoinbaseHistory(ROOT / "data" / "replay_cache")
     stats = ReplayStats()
+    summary: list[str] = []
     until = datetime.now(UTC)
     since = until - timedelta(days=days)
     try:
@@ -64,7 +65,9 @@ async def download_and_replay(s: Settings, days: int, assets: list[str], db: Rep
             markets = await dl.settled_markets(ser, since, until)
             print(f"\n{ser} ({asset}): {len(markets)} settled markets in the last {days} days")
             if not markets:
+                summary.append(f"{ser} ({asset}): NO settled markets found")
                 continue
+            ok = failed = n_obs = no_spot = 0
             spot_by_day: dict[str, list] = {}
             t0, done = time.time(), 0
             batch: list = []
@@ -75,7 +78,9 @@ async def download_and_replay(s: Settings, days: int, assets: list[str], db: Rep
                     done += 1
                     if rec is None:
                         stats.skip("download failed")
+                        failed += 1
                         continue
+                    ok += 1
                     close = datetime.fromisoformat(rec["market"]["close_time"].replace("Z", "+00:00"))
                     day_key = close.strftime("%Y%m%d")
                     if day_key not in spot_by_day:
@@ -87,6 +92,8 @@ async def download_and_replay(s: Settings, days: int, assets: list[str], db: Rep
                             spot_by_day[prev] = await spot.day(asset, close - timedelta(days=1))
                         prices = spot_by_day[prev] + prices
                     obs = replay_market(rec, asset, prices, replay_engine)
+                    n_obs += len(obs)
+                    no_spot += 0 if prices else 1
                     if not obs:
                         stats.skip("no valid setups")
                     stats.markets += 1
@@ -98,6 +105,14 @@ async def download_and_replay(s: Settings, days: int, assets: list[str], db: Rep
                     db.add_observations(batch)
                     batch = []
             print()
+            summary.append(f"{ser} ({asset}): {len(markets)} found | {ok} downloaded | {failed} failed | "
+                           f"{n_obs:,} observations | {no_spot} without spot prices")
+        print("\nPER-SERIES SUMMARY")
+        for line in summary:
+            print("  " + line)
+        missing = [a for a in assets if a not in series.values()]
+        if missing:
+            print(f"  ⚠️ no 15-minute series found for: {', '.join(missing)}")
         if not spot.available:
             print("\n⚠️ Coinbase spot history was unavailable - underlying components are missing, "
                   "so V4L cannot trigger. Other strategies are still reported.")

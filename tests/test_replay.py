@@ -160,10 +160,38 @@ async def test_download_replay_and_report_end_to_end(tmp_path):
     await client.close()
 
 
-async def test_spot_unavailable_is_reported_not_faked(tmp_path):
+async def test_spot_unavailable_is_reported_not_faked(tmp_path, monkeypatch):
+    async def no_sleep(_):
+        return None
+
+    monkeypatch.setattr("app.research.replay.asyncio.sleep", no_sleep)
+
     def down(req):
         return httpx.Response(503)
 
     spot = CoinbaseHistory(tmp_path, http=httpx.AsyncClient(transport=httpx.MockTransport(down)))
-    assert await spot.day("BTC", T0) == [] and spot.available is False
+    assert await spot.day("BTC", T0) == []
+    assert await spot.day("BTC", T0 + timedelta(days=1)) == []
+    assert spot.available is False  # gave up only after every attempt failed
+    await spot.close()
+
+
+async def test_one_spot_failure_does_not_disable_the_feed(tmp_path, monkeypatch):
+    """Regression: a single 429 used to switch spot off for every later asset."""
+    async def no_sleep(_):
+        return None
+
+    monkeypatch.setattr("app.research.replay.asyncio.sleep", no_sleep)
+    good = _coinbase_transport()
+    calls = {"n": 0}
+
+    async def flaky(req):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429)
+        return await good.handle_async_request(req)
+
+    spot = CoinbaseHistory(tmp_path, http=httpx.AsyncClient(transport=httpx.MockTransport(flaky)))
+    assert len(await spot.day("ETH", T0)) >= 1440  # retried the 429 chunk
+    assert len(await spot.day("SOL", T0)) >= 1440 and spot.available
     await spot.close()

@@ -182,7 +182,9 @@ class CoinbaseHistory:
         self.cache = Path(cache_dir)
         self.cache.mkdir(parents=True, exist_ok=True)
         self.http = http or httpx.AsyncClient(timeout=15, headers={"User-Agent": "jgapicks-research"})
-        self.available = True
+        self.available = True  # False only after repeated failures of every attempt
+        self.failed_chunks = 0
+        self.ok_chunks = 0
 
     async def day(self, asset: str, day: datetime) -> list[SpotPrice]:
         key = self.cache / f"spot_{asset}_{day:%Y%m%d}.json"
@@ -191,22 +193,40 @@ class CoinbaseHistory:
         if not self.available:
             return []
         rows: list[list[float]] = []
+        missing = False
         start = day.replace(hour=0, minute=0, second=0, microsecond=0)
         for i in range(0, 1440, 300):
             a, b = start + timedelta(minutes=i), start + timedelta(minutes=min(i + 300, 1440))
-            try:
-                r = await self.http.get(self.URL.format(asset=asset), params={
-                    "granularity": 60, "start": a.isoformat(), "end": b.isoformat()})
-                r.raise_for_status()
-                rows.extend(r.json())
-            except (httpx.HTTPError, ValueError) as exc:
-                log.warning("SPOT_HISTORY_UNAVAILABLE asset=%s error=%s", asset, type(exc).__name__)
-                self.available = False
-                return []
+            chunk = await self._chunk(asset, a, b)
+            if chunk is None:
+                missing = True  # skip just this chunk; never disable the whole feed for one failure
+                continue
+            rows.extend(chunk)
             await asyncio.sleep(0.35)  # stay well under the public rate limit
-        if day.date() < datetime.now(UTC).date():  # only cache complete days
+        if not missing and day.date() < datetime.now(UTC).date():  # only cache complete days
             key.write_text(json.dumps(rows))
+        if self.ok_chunks == 0 and self.failed_chunks >= 10:
+            self.available = False  # nothing has ever worked: stop hammering the API
         return parse_coinbase(rows, asset)
+
+    async def _chunk(self, asset: str, a: datetime, b: datetime) -> list[list[float]] | None:
+        for attempt in range(4):
+            try:
+                r = await self.http.get(self.URL.format(asset=asset),
+                                        params={"granularity": 60, "start": a.isoformat(), "end": b.isoformat()})
+                if r.status_code == 429 or r.status_code >= 500:
+                    raise httpx.HTTPStatusError("retryable", request=r.request, response=r)
+                r.raise_for_status()
+                data = r.json()
+                self.ok_chunks += 1
+                return data if isinstance(data, list) else []
+            except (httpx.HTTPError, ValueError) as exc:
+                if attempt == 3:
+                    self.failed_chunks += 1
+                    log.warning("SPOT_CHUNK_FAILED asset=%s start=%s error=%s", asset, a, type(exc).__name__)
+                    return None
+                await asyncio.sleep(1.5 * 2 ** attempt)
+        return None
 
     async def close(self) -> None:
         await self.http.aclose()
