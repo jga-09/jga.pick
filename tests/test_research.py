@@ -273,3 +273,16 @@ def test_feature_importance_ignores_what_the_price_already_knows():
         rows.append(o)
     m = {s.name: s for s in feature_importance(rows)}["momentum"]
     assert m.stars == 0 and m.status == "not_significant"
+
+
+def test_confirm_rule_matches_backtest_v4():
+    from app.research.backtest import _v4
+    from app.strategy.confirm import confirm_side
+
+    good = {"momentum": 0.5, "trend": 0.4, "orderbook": 0.2, "underlying": 0.3}
+    assert confirm_side(good) == ("yes", [])
+    assert confirm_side({k: -v for k, v in good.items()})[0] == "no"
+    assert confirm_side(dict(good, underlying=-0.3))[0] is None
+    assert confirm_side({k: v for k, v in good.items() if k != "underlying"})[0] is None
+    assert _v4(obs(0, comps=good), {}) == "yes"
+    assert _v4(obs(0, comps=dict(good, orderbook=0.0)), {}) is None

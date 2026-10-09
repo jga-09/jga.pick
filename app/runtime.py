@@ -104,7 +104,8 @@ class BotRuntime:
         self._research = ResearchCache()
         self._strong: dict[str, str] = {}  # ticker -> direction currently alerted as strong
         self.risk = RiskManager(PositionSizer(settings.fee_rate), settings.stale_data_sec,
-                                settings.order_price_tolerance_cents, ev_gate=settings.ev_gate)
+                                settings.order_price_tolerance_cents, ev_gate=settings.ev_gate,
+                                strategy_mode=settings.strategy_mode)
         self.portfolio = Portfolio(repo, settings.paper_starting_balance)
         self.paper = PaperExecutor(self.portfolio, settings.paper_slippage_cents, settings.fee_rate)
         # The live executor is only constructed when configuration permits live trading.

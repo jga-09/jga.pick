@@ -90,6 +90,9 @@ class Settings(BaseSettings):
     calibration_prior_strength: float = Field(20.0, ge=0, le=1000)
     # "lower": gate on the conservative (80% lower-bound) EV estimate; "point": on the shrunk point estimate
     ev_gate: Literal["lower", "point"] = "lower"
+    # "quality" = signal-quality/no-trade/EV gates (default); "confirm" = experimental V4 rule
+    # (momentum + trend + order book + underlying all agree). "confirm" is PAPER ONLY.
+    strategy_mode: Literal["quality", "confirm"] = "quality"
     observation_retention_days: int = Field(365, ge=7)
     model_refresh_sec: float = Field(600.0, ge=30)
     signal_history_size: int = Field(240, ge=20, le=5000)

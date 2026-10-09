@@ -10,6 +10,7 @@ from typing import Any
 from app.kalshi.market_data import MarketSnapshot
 from app.risk.profiles import RiskLevel, RiskProfile
 from app.risk.sizing import PositionSizer
+from app.strategy.confirm import RULES, confirm_side
 from app.strategy.quality import NO_TRADE
 from app.strategy.signals import SignalResult, Validity
 from app.utils.logging import log_event
@@ -76,8 +77,9 @@ class RiskDecision:
 
 class RiskManager:
     def __init__(self, sizer: PositionSizer, stale_after_sec: float = 30.0, price_buffer_cents: float = 2.0,
-                 ev_gate: str = "lower") -> None:
+                 ev_gate: str = "lower", strategy_mode: str = "quality") -> None:
         self.ev_gate = ev_gate
+        self.strategy_mode = strategy_mode  # "quality" (default) | "confirm" (experimental, paper only)
         self.sizer = sizer
         self.stale_after_sec = stale_after_sec
         self.price_buffer_cents = price_buffer_cents
@@ -102,11 +104,19 @@ class RiskManager:
             fails.append(f"{ctx.mode.upper()} execution not permitted by configuration")
 
         side = signal.leaning.side if signal.direction.value == "WAIT" else signal.direction.side
+        confirm = self.strategy_mode == "confirm"
+        if confirm:
+            comps = signal.analysis.components if signal.analysis else signal.components
+            side, why_not = confirm_side(comps)
+            if side is None:
+                fails.append(f"Confirmation rule: {why_not[0]}")
+            if ctx.mode == "live":
+                fails.append("Experimental confirmation strategy is paper-only")
         if signal.validity is not Validity.VALID:
             fails.append(f"Signal invalid: {signal.validity.value}")
-        if side is None:
+        if side is None and not confirm:
             fails.append("No directional signal")
-        if signal.confidence < profile.min_confidence:
+        if not confirm and signal.confidence < profile.min_confidence:
             fails.append(f"Confidence {signal.confidence} below {lvl} threshold ({profile.min_confidence})")
 
         if snap.info.status not in ("", "active", "open"):
@@ -157,7 +167,14 @@ class RiskManager:
         # ---------------- setup-quality gates (signal quality, no-trade filter, EV)
         a = signal.analysis
         checks: list[CheckItem] = []
-        if a is None:
+        if confirm:
+            # The confirmation strategy replaces the quality/grade/no-trade/EV gates (those were
+            # not part of the backtested rule); every execution and safety check above still applies.
+            if ctx.adaptive_mode == "PAUSED":
+                fails.append(f"Trading paused: {ctx.adaptive_reason}")
+            warnings.append("EXPERIMENTAL confirmation strategy (paper forward test)")
+            checks = _confirm_checklist(signal, snap, profile, side, ctx)
+        elif a is None:
             fails.append("No setup analysis available")
         else:
             min_q = profile.min_signal_quality
@@ -267,4 +284,26 @@ def _checklist(sig: SignalResult, snap: MarketSnapshot, p: RiskProfile, a: Any, 
         items.append(CheckItem("Historical Setup", "⚠️ INSUFFICIENT DATA", ev_ok, critical=not ev_ok))
         items.append(CheckItem("Expected Value", "unknown", ev_ok, critical=not ev_ok))
     items.append(CheckItem("Market mode", ctx.adaptive_mode.title(), ctx.adaptive_mode != "PAUSED"))
+    return items
+
+
+def _confirm_checklist(sig: SignalResult, snap: MarketSnapshot, p: RiskProfile, side: str | None,
+                       ctx: RiskContext) -> list[CheckItem]:
+    comps = sig.analysis.components if sig.analysis else sig.components
+    sign = 1 if side == "yes" else -1 if side == "no" else (1 if sig.leaning.value == "UP" else -1)
+    items = [CheckItem("Strategy", "CONFIRM (experimental)", True, critical=False),
+             CheckItem("Direction", {"yes": "UP", "no": "DOWN"}.get(side or "", "none"), side is not None)]
+    for name, need in RULES.items():
+        v = comps.get(name)
+        items.append(CheckItem(name.title(), "n/a" if v is None else f"{v * sign:+.2f} (need ≥{need})",
+                               v is not None and v * sign >= need))
+    spread, liq = snap.spread, snap.ask_liquidity(side) if side else 0.0
+    items += [
+        CheckItem("Spread", f"{spread:.0f}¢" if spread is not None else "n/a",
+                  spread is not None and spread <= p.max_spread_cents),
+        CheckItem("Liquidity", f"{liq:.0f}", liq >= p.min_liquidity_contracts),
+        CheckItem("Time", f"{int(snap.time_remaining() // 60):02d}:{int(snap.time_remaining() % 60):02d}",
+                  snap.time_remaining() >= p.min_time_remaining_sec),
+        CheckItem("Mode", ctx.mode.upper(), ctx.mode == "paper"),
+    ]
     return items

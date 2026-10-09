@@ -18,6 +18,7 @@ from app.research.calibration import HistoricalModel, cost_cents
 from app.research.dataset import Observation
 from app.research.stats import TradeMetrics, diff_z, mean, stdev, trade_metrics
 from app.strategy.config import ALL_FILTERS
+from app.strategy.confirm import confirm_side
 from app.strategy.quality import FILTER_TEXT
 
 Selector = Callable[[Observation, dict[str, Any]], str | None]
@@ -92,9 +93,7 @@ def _v3(o: Observation, ctx: dict[str, Any]) -> str | None:
 
 
 def _v4(o: Observation, ctx: dict[str, Any]) -> str | None:
-    side = _v3(o, ctx)
-    u = _comp(o, "underlying")
-    return side if side and u is not None and u * _sign(side) >= 0.2 else None
+    return confirm_side(o.components)[0]  # same function the live "confirm" mode uses
 
 
 def _v5(o: Observation, ctx: dict[str, Any]) -> str | None:

@@ -220,3 +220,20 @@ def test_checklist_reflects_checks(rm):
                    "Historical Setup", "Expected Value"):
         assert needed in labels
     assert d.approved and all(c.ok for c in d.checklist if c.critical)
+
+
+def test_confirm_mode_is_paper_only_and_uses_v4_rule():
+    rm = RiskManager(PositionSizer(0.07), stale_after_sec=30, price_buffer_cents=2, strategy_mode="confirm")
+    snap = quote_snapshot(make_info())
+    comps = {"momentum": 0.6, "trend": 0.5, "orderbook": 0.3, "underlying": 0.4}
+    weak = analysis(quality=30, grade="NO_TRADE", hard=("sideways",))  # quality layer would reject
+    weak = SetupAnalysis(**{**weak.__dict__, "components": comps})
+    s = sig(confidence=55, a=weak)
+    d = rm.evaluate(s, snap, PROFILES[RiskLevel.HIGH], ctx())
+    assert d.approved and d.side == "yes" and any("EXPERIMENTAL" in w for w in d.warnings)
+    assert not rm.evaluate(s, snap, PROFILES[RiskLevel.HIGH], ctx(mode="live")).approved
+    no_ob = SetupAnalysis(**{**weak.__dict__, "components": dict(comps, orderbook=-0.2)})
+    d2 = rm.evaluate(sig(a=no_ob), snap, PROFILES[RiskLevel.HIGH], ctx())
+    assert not d2.approved and "Order book does not confirm" in d2.reason
+    # safety checks still apply in confirm mode
+    assert not rm.evaluate(s, snap, PROFILES[RiskLevel.HIGH], ctx(daily_realized_pnl=-100)).approved

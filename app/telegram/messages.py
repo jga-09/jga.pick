@@ -156,7 +156,8 @@ def signal_card(rt: BotRuntime, ticker: str) -> Screen:
     remaining = f"⏱ {fmt_countdown(snap.time_remaining())} remaining · {_time_window(rt, a.time_bucket)}"
     if not approved:
         # ⚪ NO TRADE card: show the lean, both scores and exactly why it is rejected.
-        reasons = list(dict.fromkeys([*a.reasons, *(decision.failures if decision else ())]))
+        quality_flags = [] if rt.settings.strategy_mode == "confirm" else a.reasons
+        reasons = list(dict.fromkeys([*quality_flags, *(decision.failures if decision else ())]))
         lean = f"{sig.leaning.emoji} {sig.leaning.value}" if sig.leaning is not Direction.WAIT else "⚪ none"
         lines = [*head, "<b>⚪ NO TRADE</b>", "", f"Signal: {lean}", f"Raw Confidence: {sig.confidence}%",
                  f"Signal Quality: {a.quality}/100 · {a.grade}", "",
@@ -456,6 +457,8 @@ def strategy(rt: BotRuntime) -> Screen:
     lines = [
         "🧠 <b>STRATEGY</b>", "",
         "Type:", "Directional", "",
+        "Mode:", ("🧪 CONFIRM (experimental V4, paper only)" if rt.settings.strategy_mode == "confirm"
+                  else "Quality filter"), "",
         "Market:", f"{rt.settings.market_duration_minutes} MIN", "",
         "Signal Model:", "Multi-factor confirmation (10 components)" + (" + Spot" if und != "none" else ""), "",
         "Minimum Confidence:", str(p.min_confidence), "",
