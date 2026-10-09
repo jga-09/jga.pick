@@ -15,6 +15,7 @@ Raw downloads are cached as JSON so re-runs are instant.
 from __future__ import annotations
 
 import asyncio
+import gzip
 import json
 import logging
 from collections.abc import Callable
@@ -80,6 +81,39 @@ def parse_coinbase(raw: list[list[float]], asset: str) -> list[SpotPrice]:
     return [by_ts[t] for t in sorted(by_ts)]
 
 
+# ------------------------------------------------------------ compact cache
+_MARKET_KEYS = ("ticker", "event_ticker", "title", "yes_sub_title", "open_time", "close_time", "result",
+                "floor_strike", "cap_strike", "strike_type", "status")
+
+
+def compact_record(record: dict[str, Any]) -> dict[str, Any]:
+    """Keep only what the replay uses (cache format v2, ~20-50x smaller than raw API JSON)."""
+    if record.get("v") == 2:
+        return record
+    candles = [[int(c.ts.timestamp()), c.yes_bid, c.yes_ask, c.price, c.volume]
+               for c in parse_candles(record.get("candles") or [])]
+    trades = []
+    for raw in record.get("trades") or []:
+        t = parse_trade(raw)
+        if t is not None:
+            trades.append([round(t.ts.timestamp(), 3), t.yes_price, t.count, "y" if t.taker_side == "yes" else "n"])
+    market = {k: record["market"].get(k) for k in _MARKET_KEYS if k in record["market"]}
+    return {"v": 2, "market": market, "series": record["series"], "candles": candles, "trades": trades}
+
+
+def _record_candles(record: dict[str, Any]) -> list[Candle]:
+    if record.get("v") == 2:
+        return [Candle(datetime.fromtimestamp(r[0], UTC), r[1], r[2], r[3], r[4]) for r in record["candles"]]
+    return parse_candles(record.get("candles") or [])
+
+
+def _record_trades(record: dict[str, Any]) -> list[TradePrint]:
+    if record.get("v") == 2:
+        return [TradePrint(f"{record['market']['ticker']}-{i}", r[1], r[2], "yes" if r[3] == "y" else "no",
+                           datetime.fromtimestamp(r[0], UTC)) for i, r in enumerate(record["trades"])]
+    return [t for t in (parse_trade(x) for x in record.get("trades") or []) if t]
+
+
 # ---------------------------------------------------------------- downloader
 class HistoryDownloader:
     def __init__(self, client: Any, cache_dir: str | Path, concurrency: int = 6) -> None:
@@ -122,9 +156,15 @@ class HistoryDownloader:
 
     async def market_data(self, series: str, market: dict[str, Any]) -> dict[str, Any] | None:
         ticker = market["ticker"]
-        path = self.cache / f"{ticker}.json"
+        path = self.cache / f"{ticker}.json.gz"
         if path.exists():
-            return json.loads(path.read_text())
+            return json.loads(gzip.decompress(path.read_bytes()))
+        legacy = self.cache / f"{ticker}.json"
+        if legacy.exists():  # old uncompressed cache: convert in place (frees disk space)
+            record = compact_record(json.loads(legacy.read_text()))
+            path.write_bytes(gzip.compress(json.dumps(record).encode()))
+            legacy.unlink()
+            return record
         async with self.sem:
             open_t, close_t = parse_ts(market.get("open_time")), parse_ts(market.get("close_time"))
             if open_t is None or close_t is None:
@@ -136,8 +176,8 @@ class HistoryDownloader:
             except KalshiError as exc:
                 log.warning("REPLAY_DOWNLOAD_FAILED ticker=%s error=%s", ticker, exc)
                 return None
-        record = {"market": market, "series": series, "candles": candles, "trades": trades}
-        path.write_text(json.dumps(record))
+        record = compact_record({"market": market, "series": series, "candles": candles, "trades": trades})
+        path.write_bytes(gzip.compress(json.dumps(record).encode()))
         return record
 
     async def _candles(self, series: str, ticker: str, start: int, end: int) -> list[dict[str, Any]]:
@@ -187,9 +227,9 @@ class CoinbaseHistory:
         self.ok_chunks = 0
 
     async def day(self, asset: str, day: datetime) -> list[SpotPrice]:
-        key = self.cache / f"spot_{asset}_{day:%Y%m%d}.json"
+        key = self.cache / f"spot_{asset}_{day:%Y%m%d}.json.gz"
         if key.exists():
-            return parse_coinbase(json.loads(key.read_text()), asset)
+            return parse_coinbase(json.loads(gzip.decompress(key.read_bytes())), asset)
         if not self.available:
             return []
         rows: list[list[float]] = []
@@ -204,7 +244,7 @@ class CoinbaseHistory:
             rows.extend(chunk)
             await asyncio.sleep(0.35)  # stay well under the public rate limit
         if not missing and day.date() < datetime.now(UTC).date():  # only cache complete days
-            key.write_text(json.dumps(rows))
+            key.write_bytes(gzip.compress(json.dumps(rows).encode()))
         if self.ok_chunks == 0 and self.failed_chunks >= 10:
             self.available = False  # nothing has ever worked: stop hammering the API
         return parse_coinbase(rows, asset)
@@ -253,10 +293,9 @@ def replay_market(record: dict[str, Any], asset: str, spot: list[SpotPrice],
     except MalformedResponseError:
         return []
     result = market.get("result")
-    candles = [c for c in parse_candles(record.get("candles") or [])
+    candles = [c for c in _record_candles(record)
                if info.open_time is None or info.open_time < c.ts <= info.close_time]
-    trades: list[TradePrint] = sorted((t for t in (parse_trade(x) for x in record.get("trades") or []) if t),
-                                      key=lambda t: t.ts)
+    trades: list[TradePrint] = sorted(_record_trades(record), key=lambda t: t.ts)
     engine = engine_factory()
     out: list[Observation] = []
     seen: set[int] = set()

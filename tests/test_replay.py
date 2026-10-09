@@ -152,7 +152,9 @@ async def test_download_replay_and_report_end_to_end(tmp_path):
     n_calls = len(calls)
     await dl.market_data("KXBTC15M", found[0])
     assert len(calls) == n_calls
-    cached = json.loads((tmp_path / "cache" / f"{found[0]['ticker']}.json").read_text())
+    import gzip
+
+    cached = json.loads(gzip.decompress((tmp_path / "cache" / f"{found[0]['ticker']}.json.gz").read_bytes()))
     assert cached["market"]["ticker"] == found[0]["ticker"]
     report = stress_report(obs, "V4L", BacktestConfig(), picked_on_this_data=False)
     assert "V4L" in report and "VERDICT" in report
@@ -195,3 +197,24 @@ async def test_one_spot_failure_does_not_disable_the_feed(tmp_path, monkeypatch)
     assert len(await spot.day("ETH", T0)) >= 1440  # retried the 429 chunk
     assert len(await spot.day("SOL", T0)) >= 1440 and spot.available
     await spot.close()
+
+
+async def test_cache_is_compact_and_legacy_files_are_converted(tmp_path):
+    transport, markets, calls = _kalshi_transport(3)
+    client = KalshiClient(make_settings(data_source="kalshi", kalshi_read_rps=50), transport=transport)
+    dl = HistoryDownloader(client, tmp_path)
+    raw = {"market": markets[1], "series": "KXBTC15M", "candles": _candles(markets[1], "up", False),
+           "trades": _trades(markets[1], "up")}
+    legacy = tmp_path / f"{markets[1]['ticker']}.json"
+    legacy.write_text(json.dumps(raw))
+    rec = await dl.market_data("KXBTC15M", markets[1])
+    assert rec["v"] == 2 and not legacy.exists()
+    gz = tmp_path / f"{markets[1]['ticker']}.json.gz"
+    assert gz.exists() and gz.stat().st_size < len(json.dumps(raw)) / 5
+    # compact and raw records replay identically
+    spot_prices = parse_coinbase([[int((T0 + timedelta(minutes=k)).timestamp()), 1, 1, 1, 60000 + k, 1]
+                                  for k in range(-10, 60)], "BTC")
+    a = replay_market(raw, "BTC", spot_prices, replay_engine)
+    b = replay_market(rec, "BTC", spot_prices, replay_engine)
+    assert [(o.minute, o.direction, o.quality) for o in a] == [(o.minute, o.direction, o.quality) for o in b]
+    await client.close()

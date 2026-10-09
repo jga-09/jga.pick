@@ -28,6 +28,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from sqlalchemy.exc import OperationalError  # noqa: E402
+
 from app.config import Settings  # noqa: E402
 from app.database.db import Database  # noqa: E402
 from app.database.repository import Repository  # noqa: E402
@@ -140,7 +142,15 @@ def main() -> None:
         Path(args.db).unlink(missing_ok=True)
         repo = Repository(Database(f"sqlite:///{Path(args.db).resolve()}"))
         repo.init()
-        stats = asyncio.run(download_and_replay(s, args.days, assets, repo))
+        try:
+            stats = asyncio.run(download_and_replay(s, args.days, assets, repo))
+        except (OSError, OperationalError) as exc:
+            if "full" in str(exc).lower() or getattr(exc, "errno", None) == 28:
+                print("\n❌ DISK FULL. Free space, then re-run (finished downloads are cached):\n"
+                      "   du -sh ~/jga.pick/data/* ; rm -rf ~/.cache/pip ~/.cache/uv\n"
+                      "   or enlarge Linux: Settings > About ChromeOS > Developers > Linux > Disk size")
+                sys.exit(1)
+            raise
         print(f"\nReplayed {stats.markets} markets -> {stats.observations:,} observations. "
               f"Skipped: {dict(stats.skipped) or 'none'}")
     obs = repo.observations(source="replay")
