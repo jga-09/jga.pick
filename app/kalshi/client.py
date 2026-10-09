@@ -119,6 +119,10 @@ class KalshiClient:
         return await retry_async(lambda: self._request("GET", path, params=params, auth=auth), label=path)
 
     # ------------------------------------------------------------- market data
+    async def get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Generic read (retried, rate-limited) for endpoints without a dedicated helper."""
+        return await self._get(path, params)
+
     async def get_exchange_status(self) -> dict[str, Any]:
         return await self._get("/exchange/status")
 

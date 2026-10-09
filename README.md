@@ -215,7 +215,17 @@ feature performance.
 python scripts/research.py              # REAL data: calibration, regimes, time/price buckets,
                                         # feature importance, walk-forward V0-V6, filter ablation
 python scripts/simulate.py              # SYNTHETIC sanity check of the machinery (not market evidence)
+python scripts/replay.py --days 14      # REAL past Kalshi markets replayed through the engine (see below)
+python scripts/test_strategy.py         # robustness check of one fixed rule (default V4) on live data
+python scripts/diagnose.py              # plain-language "why is the bot not trading?"
 ```
+
+**Historical replay** (`scripts/replay.py`) downloads settled 15-minute markets (1-minute candlesticks +
+trades, falling back to `/historical/*` endpoints for older markets) and Coinbase 1-minute spot prices,
+caches them in `data/replay_cache/`, replays every market minute by minute through the bot's own engine and
+stores the observations in `data/replay.db` (never mixed with live statistics). Limits: Kalshi keeps no
+order-book history, so V3/V4 cannot be replayed - **V4L** (V4 without the order book) can; quotes are
+1-minute closes rather than 5-second snapshots; spot is Coinbase, a proxy for Kalshi's settlement index.
 
 Walk-forward = rolling train → validate → out-of-sample test over chronological chunks of markets
 (or `--unit days`). Only V6 learns anything, and only from data earlier than its test period.

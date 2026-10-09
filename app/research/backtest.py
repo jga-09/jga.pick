@@ -96,6 +96,10 @@ def _v4(o: Observation, ctx: dict[str, Any]) -> str | None:
     return confirm_side(o.components)[0]  # same function the live "confirm" mode uses
 
 
+def _v4l(o: Observation, ctx: dict[str, Any]) -> str | None:
+    return confirm_side(o.components, require_orderbook=False)[0]
+
+
 def _v5(o: Observation, ctx: dict[str, Any]) -> str | None:
     return o.side if o.grade in ("A+", "A", "B") else None
 
@@ -134,6 +138,7 @@ STRATEGIES: list[Strategy] = [
     Strategy("V2", "Momentum + Trend", _v2),
     Strategy("V3", "Momentum + Trend + Order book", _v3),
     Strategy("V4", "Confirm: momentum + trend + order book + underlying agree", _v4),
+    Strategy("V4L", "Confirm without order book: momentum + trend + underlying", _v4l),
     Strategy("V5", "Full confirmation (grade ≥ B)", _v5),
     Strategy("V6", "V5 + regime/time/price filter + EV gate (fit on past only)", _v6, _fit_v6),
 ]
