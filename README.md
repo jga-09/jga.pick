@@ -151,6 +151,27 @@ The database lives in the named volume `bot-data`. Secrets are read from `.env` 
 never copied into the image (`.dockerignore` excludes `.env` and `*.pem`). To use a Kalshi key,
 uncomment the read-only key mount and `KALSHI_PRIVATE_KEY_PATH` in `docker-compose.yml`.
 
+## 13b. Deploy to a cloud server (runs 24/7 without your computer)
+
+Any small Ubuntu 22.04/24.04 server works (1 GB RAM, ~25 GB disk, **US region** - Kalshi is US-only).
+From the machine that currently runs the bot:
+
+```bash
+# 1. copy code + .env + bot.db (not the venv or replay cache), and the Kalshi key
+tar czf - --exclude=.venv --exclude=data/replay_cache --exclude='data/replay.db*' -C ~ jga.pick \
+  | ssh root@SERVER_IP 'mkdir -p /home/bot && tar xzf - -C /home/bot'
+scp ~/.kalshi/kalshi.pem root@SERVER_IP:/root/kalshi.pem     # skip if you have no key
+# 2. stop the local copy (only ONE bot may poll Telegram at a time)
+tmux kill-session -t bot; pkill -f app.main
+# 3. install + start as a service
+ssh root@SERVER_IP 'bash /home/bot/jga.pick/scripts/server_setup.sh'
+```
+
+`server_setup.sh` installs Python 3.12 and dependencies, runs the bot as the `jgapicks` systemd service
+(starts on boot, restarts after crashes), enables `AUTO_START` (paper mode only), adds swap and a firewall
+that only allows SSH. Logs: `journalctl -u jgapicks -f`. Update: `cd /home/bot/jga.pick && sudo -u bot git pull
+&& systemctl restart jgapicks`.
+
 ## 14. Testing
 
 ```bash

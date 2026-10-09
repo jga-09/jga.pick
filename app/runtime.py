@@ -185,6 +185,15 @@ class BotRuntime:
         self._tasks.clear()
         self.repo.add_event("BOT_STOPPED")
 
+    def should_auto_start(self) -> tuple[bool, str]:
+        if not self.settings.auto_start:
+            return False, "AUTO_START=false"
+        if self.state.mode != "paper":
+            return False, "auto-start is paper-only; start live trading manually"
+        if self.state.emergency_stop:
+            return False, "emergency stop is active"
+        return True, "ok"
+
     def pause(self) -> None:
         self.store.update(paused=True)
         self.repo.add_event("TRADING_PAUSED")

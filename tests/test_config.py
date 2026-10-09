@@ -67,3 +67,15 @@ def test_unsafe_profile_override_rejected(monkeypatch):
     monkeypatch.setenv("HIGH_MAX_OPEN_POSITIONS", "500")
     with pytest.raises(ConfigError):
         load_profiles()
+
+
+def test_auto_start_is_paper_only_and_respects_estop(runtime):
+    assert runtime.should_auto_start()[0] is False  # default off
+    runtime.settings = runtime.settings.model_copy(update={"auto_start": True})
+    assert runtime.should_auto_start()[0] is True
+    runtime.store.state.emergency_stop = True
+    assert runtime.should_auto_start()[0] is False
+    runtime.store.state.emergency_stop = False
+    runtime.store.state.mode = "live"
+    ok, why = runtime.should_auto_start()
+    assert ok is False and "paper-only" in why

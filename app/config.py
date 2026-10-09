@@ -110,6 +110,10 @@ class Settings(BaseSettings):
     signal_retention_days: int = Field(30, ge=1)
     event_retention_days: int = Field(30, ge=1)
 
+    # Start the market scanner automatically when the program starts (servers / reboots).
+    # Only ever applies in PAPER mode and never while the emergency stop is active.
+    auto_start: bool = False
+
     log_level: str = "INFO"
 
     @field_validator("log_level")

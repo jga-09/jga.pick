@@ -41,6 +41,12 @@ def build_application(rt: BotRuntime, token: str) -> Application:
         await app.bot.set_my_commands([BotCommand(c, d) for c, d in COMMANDS])
         tasks.append(asyncio.create_task(dashboard.refresh_loop(), name="dashboard-refresh"))
         log.info("TELEGRAM_READY admins=%d", len(admin_ids))
+        ok, why = rt.should_auto_start()
+        if ok:
+            await rt.start()
+            log.info("AUTO_START scanner started")
+        elif rt.settings.auto_start:
+            log.warning("AUTO_START skipped: %s", why)
 
     async def post_shutdown(app: Application) -> None:
         for t in tasks:
