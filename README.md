@@ -253,6 +253,13 @@ Walk-forward = rolling train → validate → out-of-sample test over chronologi
 Nothing is deployed automatically: change thresholds/filters in `.env` only when out-of-sample results
 with ≥30 trades support it.
 
+**Fair-value research** (`scripts/fairvalue.py`, research only) reuses the replay cache. Instead of
+momentum it prices each minute as `P(YES) = Phi(ln(spot/strike) / (sigma*sqrt(T)))` (Coinbase spot,
+previous-hour volatility) and buys only when Kalshi's ask is cheaper than that by more than fees +
+slippage + a margin. It prints the Coinbase-vs-Kalshi settlement agreement, Brier accuracy of the model vs
+Kalshi's own prices, and a walk-forward test where the margin is picked on earlier days only. Run
+`python scripts/replay.py --days 14` first. It does not change the bot.
+
 ## 16. Enabling live trading (deliberately)
 
 All of the following are required:
