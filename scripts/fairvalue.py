@@ -167,6 +167,9 @@ def main() -> None:
         print(f"     {a}: {fmt_m(fv_metrics(ts))}")
 
     print("\nVERDICT")
+    if m.trades == 0 and wf.chosen and all(mg is None for _, mg in wf.chosen):
+        print("   ❌ No edge after costs: no margin was ever profitable on past days, so it never traded.")
+        return
     if m.trades < 30:
         print(f"   ⚠️ INSUFFICIENT DATA: {m.trades} out-of-sample trades (need 30+). Download more days.")
         return
