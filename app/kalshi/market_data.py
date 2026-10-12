@@ -72,6 +72,9 @@ class MarketInfo:
     cap_strike: float | None = None
     strike_type: str | None = None
     result: str = ""
+    # Settlement rules exactly as published by Kalshi (used to verify what YES/NO mean).
+    rules_primary: str = ""
+    rules_secondary: str = ""
 
     @property
     def duration_sec(self) -> float | None:
@@ -208,6 +211,8 @@ def parse_market_info(raw: dict[str, Any], *, asset: str, series_ticker: str) ->
             cap_strike=to_float(raw.get("cap_strike")),
             strike_type=raw.get("strike_type"),
             result=str(raw.get("result") or ""),
+            rules_primary=str(raw.get("rules_primary") or ""),
+            rules_secondary=str(raw.get("rules_secondary") or ""),
         )
     except (KeyError, ValueError, TypeError) as exc:
         raise MalformedResponseError(f"bad market payload: {exc}") from exc

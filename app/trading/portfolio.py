@@ -82,6 +82,7 @@ class Portfolio:
         self.starting_balance = starting_balance
         self.positions: dict[int, Position] = {p.id: p for p in repo.open_positions() if p.id}
         self.inflight: set[str] = set()
+        self.unresolved: set[str] = set()  # live orders whose outcome could not be confirmed
         self.last_trade_at: dict[str, datetime] = {}
         self.last_loss_at: datetime | None = None
         self.live_balance: float | None = None  # refreshed from Kalshi in live mode
@@ -133,11 +134,27 @@ class Portfolio:
             open_positions=len(opens),
             open_exposure_usd=self.exposure(mode),
             open_tickers=frozenset(p.ticker for p in opens),
-            inflight_tickers=frozenset(self.inflight),
+            inflight_tickers=frozenset(self.inflight | self.unresolved),
             daily_realized_pnl=self.daily_realized(mode),
-            last_loss_at=self.last_loss_at,
+            last_loss_at=self.last_loss_at or self._last_loss_from_history(mode),
             last_trade_at=dict(self.last_trade_at),
+            consecutive_losses=self.consecutive_losses(mode),
         )
+
+    def _last_loss_from_history(self, mode: str) -> datetime | None:
+        """Survives restarts: the time of the most recent losing trade in this mode."""
+        for p in self.repo.closed_positions(mode=mode, limit=20):
+            if not p.won:
+                return p.closed_at
+        return None
+
+    def consecutive_losses(self, mode: str) -> int:
+        n = 0
+        for p in self.repo.closed_positions(mode=mode, limit=20):  # newest first
+            if p.won:
+                break
+            n += 1
+        return n
 
     # ----------------------------------------------------------- mutations
     def add_open(self, p: Position) -> Position:

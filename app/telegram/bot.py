@@ -16,7 +16,8 @@ from app.telegram.handlers import COMMAND_ROUTES, Handlers
 log = logging.getLogger(__name__)
 
 COMMANDS = [
-    ("menu", "Dashboard"), ("status", "Bot status"), ("markets", "Active markets"), ("signals", "Signals"),
+    ("menu", "Dashboard"), ("btc", "BTC 15-min signal"), ("analytics", "Analytics"),
+    ("backtest", "Backtest report"), ("calibration", "Model calibration"), ("status", "Bot status"), ("markets", "Active markets"), ("signals", "Signals"),
     ("risk", "Risk profile"), ("config", "Configuration"), ("positions", "Open positions"),
     ("trades", "Recent trades"), ("pnl", "P&L"), ("history", "Performance history"), ("strategy", "Strategy"),
     ("pause", "Pause trading"), ("resume", "Resume trading"), ("stop", "Stop bot"),

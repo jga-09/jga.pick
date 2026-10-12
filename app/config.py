@@ -65,7 +65,7 @@ class Settings(BaseSettings):
     data_source: Literal["kalshi", "fixture"] = "kalshi"
 
     # --- Market discovery -----------------------------------------------
-    assets: str = "BTC,ETH,SOL"
+    assets: str = "BTC"
     series_tickers: str = ""
     auto_discover_series: bool = True
     market_duration_minutes: int = Field(15, ge=1, le=240)
@@ -77,7 +77,15 @@ class Settings(BaseSettings):
     orderbook_depth: int = Field(10, ge=1, le=100)
     use_websocket: bool = True
     stale_data_sec: float = Field(30.0, ge=5)
-    underlying_provider: Literal["none", "coinbase"] = "none"
+    underlying_provider: Literal["none", "coinbase", "coinbase_exchange"] = "none"
+    # --- BTC engine (STRATEGY_MODE=btc) -----------------------------------
+    btc_feed_stale_sec: float = Field(15.0, ge=2, le=120)
+    btc_basis_bps: float = Field(3.0, ge=0, le=100)  # Coinbase vs Kalshi settlement index uncertainty
+    btc_sigma_window_min: int = Field(60, ge=15, le=300)
+    max_data_skew_sec: float = Field(20.0, ge=1, le=120)  # max gap between Kalshi and BTC timestamps
+    require_settlement_rules: bool = True  # never trade a contract whose rules text is missing
+    calibration_ece_tol: float = Field(0.05, gt=0, le=0.3)
+    btc_backtest_report: str = "data/btc_backtest_report.json"  # written by scripts/btc_backtest.py
 
     # --- Signal engine --------------------------------------------------
     signal_min_confidence: int = Field(55, ge=0, le=100)
@@ -92,7 +100,8 @@ class Settings(BaseSettings):
     ev_gate: Literal["lower", "point"] = "lower"
     # "quality" = signal-quality/no-trade/EV gates (default); "confirm" = experimental V4 rule
     # (momentum + trend + order book + underlying all agree). "confirm" is PAPER ONLY.
-    strategy_mode: Literal["quality", "confirm"] = "quality"
+    # "btc" (default) = Bitcoin probability model + net-edge + no-trade engine (app/strategy/btc_decision.py)
+    strategy_mode: Literal["btc", "quality", "confirm"] = "btc"
     observation_retention_days: int = Field(365, ge=7)
     model_refresh_sec: float = Field(600.0, ge=30)
     signal_history_size: int = Field(240, ge=20, le=5000)
@@ -138,6 +147,8 @@ class Settings(BaseSettings):
 
     @property
     def asset_list(self) -> list[str]:
+        if self.strategy_mode == "btc":
+            return ["BTC"]  # the BTC engine never evaluates other assets
         return [a.strip().upper() for a in self.assets.split(",") if a.strip()]
 
     @property
@@ -190,6 +201,8 @@ class Settings(BaseSettings):
             errors.append("DATA_SOURCE=fixture can never be combined with live trading")
         if self.allow_live_autotrade and not self.live_allowed:
             warnings.append("ALLOW_LIVE_AUTOTRADE ignored because live trading is not enabled")
+        if self.strategy_mode == "btc" and {a.strip().upper() for a in self.assets.split(",") if a.strip()} - {"BTC"}:
+            warnings.append("STRATEGY_MODE=btc trades Bitcoin only; other ASSETS are ignored")
         if not self.asset_list and not self.series_list:
             errors.append("Configure ASSETS and/or SERIES_TICKERS")
         if errors:

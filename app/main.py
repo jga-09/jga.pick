@@ -32,7 +32,12 @@ def build_runtime(settings: Settings) -> BotRuntime:
         client = KalshiClient(settings, signer)
     repo = Repository(Database(settings.database_url))
     repo.init()
-    if settings.data_source == "fixture":
+    if settings.strategy_mode == "btc":
+        from app.data.btc_feed import BTCFeed, FixtureBTCFeed
+
+        # Real Coinbase BTC-USD feed; fixture mode gets a synthetic, clearly labelled one.
+        underlying = FixtureBTCFeed() if settings.data_source == "fixture" else BTCFeed(settings.btc_feed_stale_sec)
+    elif settings.data_source == "fixture":
         from app.kalshi.fixtures import FixtureUnderlyingProvider
 
         underlying = FixtureUnderlyingProvider(client=client)  # synthetic, paired with fixture markets

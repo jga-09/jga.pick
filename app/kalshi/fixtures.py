@@ -67,6 +67,13 @@ def fixture_mid(trend: str, t: float) -> float:
     return max(3.0, min(97.0, round(v)))
 
 
+def fixture_rules(asset: str, strike: float | None, end: datetime) -> str:
+    """Synthetic rules text in the style of Kalshi's crypto contracts (fixture data only)."""
+    name = {"BTC": "Bitcoin", "ETH": "Ethereum", "SOL": "Solana"}.get(asset, asset)
+    return (f"[FIXTURE] If the simple average of the sixty seconds of CF Benchmarks' {name} Real-Time Index "
+            f"(BRTI) before {end:%H:%M} UTC is above {strike or 0:,.2f}, then the market resolves to Yes.")
+
+
 def fixture_info(asset: str, now: datetime) -> MarketInfo:
     start, end = window_bounds(now)
     series = f"KX{asset}15M"
@@ -75,6 +82,7 @@ def fixture_info(asset: str, now: datetime) -> MarketInfo:
         ticker=f"{series}-{stamp}", event_ticker=f"{series}-{stamp}", series_ticker=series, asset=asset,
         title=f"{asset} price up in next 15 mins?", subtitle="Fixture market", open_time=start,
         close_time=end, expiration_time=end, status="active", floor_strike=FIXTURE_STRIKES.get(asset),
+        strike_type="greater_or_equal", rules_primary=fixture_rules(asset, FIXTURE_STRIKES.get(asset), end),
     )
 
 
@@ -87,7 +95,8 @@ def fixture_market_raw(info: MarketInfo, mid: float, spread: float = 2.0) -> dic
         "yes_bid_dollars": f"{yes_bid / 100:.4f}", "yes_ask_dollars": f"{yes_ask / 100:.4f}",
         "no_bid_dollars": f"{(100 - yes_ask) / 100:.4f}", "no_ask_dollars": f"{(100 - yes_bid) / 100:.4f}",
         "last_price_dollars": f"{mid / 100:.4f}", "volume_fp": "1520.00", "open_interest_fp": "830.00",
-        "result": "",
+        "result": "", "floor_strike": info.floor_strike, "cap_strike": info.cap_strike,
+        "strike_type": info.strike_type, "rules_primary": info.rules_primary,
     }
 
 

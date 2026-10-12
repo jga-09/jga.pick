@@ -20,7 +20,7 @@ COMMAND_ROUTES = {
     "start": "home", "menu": "home", "status": "status", "markets": "signals", "signals": "signals",
     "risk": "risk", "config": "cfg", "positions": "pos", "trades": "trades:0", "pnl": "pnl",
     "history": "hist:today", "strategy": "strat", "pause": "pause", "resume": "resume", "stop": "stop",
-    "estop": "estop",
+    "estop": "estop", "btc": "btc", "analytics": "banl", "backtest": "bt", "calibration": "bcal",
 }
 
 

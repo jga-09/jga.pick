@@ -27,7 +27,11 @@ from app.risk.sizing import PositionSizer
 from app.state import BotState, StateStore
 from app.research.adaptive import AdaptiveState, assess
 from app.research.calibration import HistEstimate, HistoricalModel
-from app.research.dataset import from_signal
+from app.research.btc_calibration import CalibrationReport, calibration_report
+from app.research.dataset import from_btc_signal, from_signal
+from app.kalshi.contract import interpret_contract
+from app.strategy.btc_decision import UNCALIBRATED, BTCInputs, BTCParams, BTCSignal, decide
+from app.strategy.btc_model import ModelConfig, classify_regime, compute_btc_features, estimate_probability
 from app.research.tradeanalysis import analyze_trade, describe, entry_snapshot, exit_snapshot
 from app.strategy.config import StrategyConfig
 from app.strategy.engine import SignalEngine
@@ -94,6 +98,9 @@ class BotRuntime:
         self.engine = SignalEngine(settings.signal_history_size, settings.signal_min_confidence,
                                    settings.stale_data_sec, min_history_sec=settings.signal_min_history_sec,
                                    config=self.strategy_config)
+        self.btc_mode = settings.strategy_mode == "btc"
+        self.btc_cfg = ModelConfig(sigma_window_min=settings.btc_sigma_window_min, basis_bps=settings.btc_basis_bps)
+        self.calibration: CalibrationReport | None = None
         self.model = self._build_model()
         self._model_built = time.time()
         self.adaptive = AdaptiveState("NORMAL")
@@ -232,6 +239,8 @@ class BotRuntime:
         self.store.update(risk_overrides=overrides)
 
     def set_auto_trade(self, on: bool) -> tuple[bool, str]:
+        if on and self.state.mode == "live" and self.btc_mode:
+            return False, "BTC engine: live orders always need manual confirmation (auto trade is paper only)."
         if on and self.state.mode == "live" and not self.settings.live_autotrade_allowed:
             return False, "Live auto-trading is disabled (ALLOW_LIVE_AUTOTRADE=false)."
         if on and self.state.emergency_stop:
@@ -245,7 +254,7 @@ class BotRuntime:
         if mode == "live" and not self.mode_permitted("live"):
             return False, "Live trading is disabled by configuration (LIVE_TRADING / PAPER_TRADING / credentials)."
         changes: dict[str, Any] = {"mode": mode}
-        if mode == "live" and not self.settings.live_autotrade_allowed:
+        if mode == "live" and (self.btc_mode or not self.settings.live_autotrade_allowed):
             changes["auto_trade"] = False
         self.store.update(**changes)
         self.repo.add_event("MODE_CHANGED", mode, "WARNING" if mode == "live" else "INFO")
@@ -296,10 +305,69 @@ class BotRuntime:
             "last_poll": self.last_poll_at,
             "last_error": self.last_error or self.discovery.state.last_error,
             "fixture": self.fixture_mode,
+            "btc_feed": self.btc_feed_status(),
         }
+
+    def btc_feed_status(self) -> Any:
+        status = getattr(self.underlying, "status", None)
+        return status() if callable(status) else None
+
+    # ------------------------------------------------------------- BTC engine
+    def btc_params(self, profile: RiskProfile | None = None) -> BTCParams:
+        p = profile or self.profile()
+        s = self.settings
+        return BTCParams(
+            min_ev_cents=p.min_ev_cents, min_strength=p.min_btc_strength, max_prob_width=p.max_prob_width,
+            max_spread_cents=p.max_spread_cents, min_liquidity=p.min_liquidity_contracts,
+            min_time_sec=p.min_time_remaining_sec, blocked_regimes=p.regimes_blocked,
+            max_late_move_cents=p.max_late_move_cents, require_calibration=p.require_known_ev,
+            fee_rate=s.fee_rate, slippage_cents=s.paper_slippage_cents, kalshi_stale_sec=s.stale_data_sec,
+            btc_stale_sec=s.btc_feed_stale_sec, max_skew_sec=s.max_data_skew_sec,
+            min_entry_cents=p.min_entry_price_cents, max_entry_cents=p.max_entry_price_cents,
+        )
+
+    def _kalshi_move(self, ticker: str, now: datetime, window: float = 300) -> float | None:
+        hist = [p for p in self.engine.history(ticker) if p.ts <= now]
+        if len(hist) < 2:
+            return None
+        start = [p for p in hist if p.ts >= now - timedelta(seconds=window)]
+        if not start or (hist[-1].ts - start[0].ts).total_seconds() < window * 0.8:
+            return None
+        return hist[-1].mid - start[0].mid
+
+    async def btc_decision(self, snap: MarketSnapshot, now: datetime | None = None,
+                           spot: Any = None) -> BTCSignal:
+        now = now or utcnow()
+        terms = interpret_contract(snap.info, require_rules=self.settings.require_settlement_rules)
+        feed = self.underlying
+        if spot is None:
+            spot = await feed.get_price("BTC")
+        bars_fn = getattr(feed, "bars", None)
+        bars = bars_fn() if callable(bars_fn) else []
+        t_left = snap.time_remaining(now)
+        price = spot.price if spot is not None else None
+        feats = compute_btc_features(bars, price, now, self.btc_cfg, terms.threshold, t_left,
+                                     terms.averaging_window_sec)
+        est = estimate_probability(terms, price, bars, now, t_left, self.btc_cfg)
+        book = snap.orderbook is not None
+        paused = self.adaptive.reason if self.adaptive.mode == "PAUSED" else ""
+        inp = BTCInputs(
+            now=now, terms=terms, features=feats, regime=classify_regime(feats, self.btc_cfg), estimate=est,
+            yes_ask=snap.yes_ask, no_ask=snap.no_ask, yes_bid=snap.yes_bid, no_bid=snap.no_bid, t_left_sec=t_left,
+            kalshi_ts=snap.ts, btc_ts=spot.ts if spot is not None else None,
+            liquidity={"yes": snap.ask_liquidity("yes") if book else None,
+                       "no": snap.ask_liquidity("no") if book else None},
+            kalshi_move_5m=self._kalshi_move(snap.ticker, now),
+            calibration=self.calibration.state if self.calibration else UNCALIBRATED,
+            paused_reason=paused, live=self.state.mode == "live",
+        )
+        return decide(inp, self.btc_params())
 
     # -------------------------------------------------------------- research
     def _build_model(self) -> HistoricalModel:
+        if self.btc_mode:
+            self.calibration = calibration_report(self.repo.observations(source="btc"),
+                                                  self.settings.hist_min_samples, self.settings.calibration_ece_tol)
         return HistoricalModel(
             self.repo.observations(source="live"), self.settings.hist_min_samples,
             self.settings.calibration_prior_strength, self.settings.fee_rate, self.settings.paper_slippage_cents,
@@ -332,6 +400,14 @@ class BotRuntime:
         self._obs_keys.add((obs.ticker, obs.minute))
         return self.repo.add_observation(obs)
 
+    def record_btc_observation(self, btc: BTCSignal, snap: MarketSnapshot, now: datetime | None = None) -> bool:
+        now = now or utcnow()
+        obs = from_btc_signal(btc, snap, now)
+        if obs is None or ("btc:" + obs.ticker, obs.minute) in self._obs_keys:
+            return False
+        self._obs_keys.add(("btc:" + obs.ticker, obs.minute))
+        return self.repo.add_observation(obs)
+
     async def label_observations(self, now: datetime | None = None) -> int:
         """Attach real market results to observations of closed markets (never guessed)."""
         now = now or utcnow()
@@ -345,7 +421,7 @@ class BotRuntime:
             result = str(raw.get("result") or "")
             if result in ("yes", "no"):
                 labelled += self.repo.label_observations(ticker, result)
-        self._obs_keys = {k for k in self._obs_keys if k[0] in self.discovery.state.by_ticker}
+        self._obs_keys = {k for k in self._obs_keys if k[0].removeprefix("btc:") in self.discovery.state.by_ticker}
         return labelled
 
     def update_adaptive(self) -> AdaptiveState:
@@ -374,8 +450,9 @@ class BotRuntime:
     def make_ticket(self, sig: SignalResult, decision: RiskDecision, snap: MarketSnapshot,
                     origin: str = "manual") -> TradeTicket:
         assert decision.approved and decision.side and decision.limit_price_cents is not None
+        direction = sig.btc.leaning if sig.btc is not None else sig.leaning.value
         return self.tickets.add(TradeTicket(
-            ticker=snap.ticker, label=snap.info.label, side=decision.side, direction=sig.leaning.value,
+            ticker=snap.ticker, label=snap.info.label, side=decision.side, direction=direction,
             contracts=decision.position_size, limit_price_cents=decision.limit_price_cents,
             quoted_price_cents=decision.price_cents or decision.limit_price_cents,
             cost_usd=decision.cost_usd, fee_usd=decision.fee_usd, risk_level=decision.risk_level.value,
@@ -411,6 +488,17 @@ class BotRuntime:
             est = self.estimate_for(sig, snap)
             entry["p_model"] = est.p_model if est and est.p_model is not None else pos.entry_price / 100
             entry["ev_cents"] = est.ev_cents if est else None
+            if sig.btc is not None and sig.btc.edge is not None:
+                b = sig.btc
+                entry["p_model"] = b.edge.p_point
+                entry["ev_cents"] = b.edge.ev_cents
+                entry["btc"] = {
+                    "p_low": b.edge.p_low, "ev_low_cents": b.edge.ev_low_cents, "ask": b.edge.ask,
+                    "cost_cents": b.edge.cost_cents, "strength": b.strength, "regime": b.regime.value,
+                    "calibration": b.calibration.status, "threshold": b.terms.threshold,
+                    "spot": b.features.spot, "dist_sigma": b.features.dist_sigma,
+                    "warnings": list(b.warnings), "risk_level": self.state.risk_level.value,
+                }
             self.repo.save_trade_context(pos.id, pos.ticker, entry=entry)
         self.repo.add_event("TRADE_OPENED", f"{pos.mode} {pos.ticker} {pos.side} x{pos.contracts}@{pos.entry_price}")
         await self.notify("trade_opened", f"open:{pos.id}", messages.trade_opened_alert(pos))
@@ -526,6 +614,9 @@ class BotRuntime:
             spot_hist = self.underlying.history(snap.info.asset)
         sig = self.engine.evaluate(snap, threshold=prof.min_confidence, min_quality=prof.min_signal_quality,
                                    threshold_label=prof.level.title, spot=spot, spot_history=spot_hist)
+        if self.btc_mode:
+            sig = replace(sig, btc=await self.btc_decision(snap, spot=spot))
+            self.engine.latest[snap.ticker] = sig
         self._last_signal[snap.ticker] = sig
         return sig
 
@@ -533,6 +624,8 @@ class BotRuntime:
         sig = await self.evaluate_snapshot(snap)
         self._persist(snap, sig)
         self.record_observation(sig, snap)
+        if sig.btc is not None:
+            self.record_btc_observation(sig.btc, snap)
 
         flip = self.engine.detect_flip(sig)
         if flip:
@@ -552,8 +645,8 @@ class BotRuntime:
         return sig
 
     async def _auto_trade(self, sig: SignalResult, snap: MarketSnapshot, decision: RiskDecision) -> None:
-        if self.state.mode == "live" and not self.settings.live_autotrade_allowed:
-            return
+        if self.state.mode == "live" and (self.btc_mode or not self.settings.live_autotrade_allowed):
+            return  # BTC engine: every live order needs a manual confirmation
         ticket = self.make_ticket(sig, decision, snap, origin="auto")
         self.tickets.discard(ticket.id)
         try:

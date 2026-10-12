@@ -37,4 +37,13 @@ MAIN_MENU: list[Button] = [
     ("🧠 Strategy", "strat"), ("🧹 Clear", "clear"),
 ]
 
+# BTC engine dashboard (STRATEGY_MODE=btc)
+BTC_MENU: list[Button] = [
+    ("🟢 Start", "start"), ("⚙️ Config", "cfg"),
+    ("🛑 Stop", "stop"), ("📊 Status", "status"),
+    ("₿ BTC Signal", "btc"), ("💰 Trades", "trades:0"),
+    ("🛡 Risk", "risk"), ("📈 Analytics", "banl"),
+    ("🧠 Strategy", "strat"), ("🧪 Backtest", "bt"),
+]
+
 BACK: Button = ("🔙 Back", "home")

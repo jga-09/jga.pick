@@ -183,6 +183,10 @@ class KalshiClient:
     async def get_positions(self) -> dict[str, Any]:
         return await self._get("/portfolio/positions", auth=True)
 
+    async def get_orders(self, ticker: str, limit: int = 100) -> list[dict[str, Any]]:
+        """GET /portfolio/orders for one market (used to reconcile orders with an unknown outcome)."""
+        return _list(await self._get("/portfolio/orders", {"ticker": ticker, "limit": limit}, auth=True), "orders")
+
     async def create_order_v2(self, body: dict[str, Any]) -> dict[str, Any]:
         """POST /portfolio/events/orders. Never retried automatically (no double orders)."""
         return await self._request("POST", "/portfolio/events/orders", json=body, auth=True)

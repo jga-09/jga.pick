@@ -111,3 +111,34 @@ def from_signal(sig: Any, snap: Any, now: datetime, source: str = "live") -> Obs
         hard_flags=list(a.hard_flags), soft_flags=list(a.soft_flags), components=dict(a.components),
         features={k: sig.features.get(k) for k in keep if sig.features.get(k) is not None}, source=source,
     )
+
+
+def from_btc_signal(btc: Any, snap: Any, now: datetime, source: str = "btc") -> Observation | None:
+    """One row per market-minute of the BTC engine: model probability, price, decision and reasons.
+
+    Recorded for EVERY evaluation with a probability (approved or not), so calibration
+    and research never depend on trades having been taken."""
+    if btc is None or btc.p_yes is None:
+        return None
+    tr = snap.time_remaining(now)
+    f = btc.features
+    direction = btc.leaning if btc.leaning in ("UP", "DOWN") else ("UP" if btc.p_yes >= 0.5 else "DOWN")
+    e = btc.edge
+    feats = {
+        "p_yes": btc.p_yes, "p_yes_low": btc.p_yes_low, "p_yes_high": btc.p_yes_high,
+        "yes_mid": snap.yes_mid, "strength": float(btc.strength), "dist_sigma": f.dist_sigma,
+        "dist_bps": f.dist_bps, "mom_z_5m": f.mom_z_5m, "mom_z_15m": f.mom_z_15m,
+        "trend_strength": f.trend_strength, "accel_z": f.accel_z, "vol_ratio": f.vol_ratio,
+        "rel_volume": f.rel_volume, "sigma_1m": f.sigma_1m, "spot": f.spot, "threshold": f.threshold,
+        "ev_cents": e.ev_cents if e else None, "ev_low_cents": e.ev_low_cents if e else None,
+        "regime_code": float(btc.regime.code), "approved": 1.0 if btc.approved else 0.0,
+    }
+    return Observation(
+        ts=now, ticker=snap.ticker, asset=snap.info.asset, close_time=snap.info.close_time, minute=int(tr // 60),
+        time_remaining=tr, direction=direction, confidence=btc.strength, quality=btc.strength, grade="BTC",
+        regime=btc.regime.value, accel_state=f.momentum_state, underlying_state="BTC", stability=None,
+        yes_ask=snap.yes_ask, no_ask=snap.no_ask, spread=snap.spread,
+        hard_flags=[r.code.name for r in btc.rejections if r.critical],
+        soft_flags=[r.code.name for r in btc.rejections if not r.critical],
+        features={k: v for k, v in feats.items() if v is not None}, source=source,
+    )

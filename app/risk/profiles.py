@@ -54,11 +54,19 @@ HARD_LIMITS = {
     "min_stability": (0.0, 1.0),
     "max_soft_flags": (0, 10),
     "min_ev_cents": (-5.0, 50.0),
+    # BTC decision engine (STRATEGY_MODE=btc)
+    "min_btc_strength": (0, 100),
+    "max_prob_width": (0.02, 0.6),
+    "max_late_move_cents": (3.0, 60.0),
+    "max_consecutive_losses": (1, 20),
+    "streak_pause_sec": (0, 86_400),
+    "kelly_fraction": (0.01, 0.5),
 }
 
 
 _INT_FIELDS = {"min_confidence", "max_open_positions", "min_time_remaining_sec", "loss_cooldown_sec",
-               "trade_cooldown_sec", "min_signal_quality", "max_soft_flags"}
+               "trade_cooldown_sec", "min_signal_quality", "max_soft_flags", "min_btc_strength",
+               "max_consecutive_losses", "streak_pause_sec"}
 
 
 @dataclass(frozen=True)
@@ -83,7 +91,19 @@ class RiskProfile:
     min_stability: float = 0.5
     max_soft_flags: int = 1
     min_ev_cents: float = 1.0  # minimum estimated EV per contract after costs (when data exists)
-    require_known_ev: bool = False  # block paper trades until history supports an EV estimate
+    require_known_ev: bool = False  # block paper trades until history supports an EV estimate / calibration
+    # BTC decision engine (STRATEGY_MODE=btc). Defaults are a-priori starting points, not fitted values.
+    min_btc_strength: int = 45  # 0-100 agreement of BTC evidence with the trade direction
+    max_prob_width: float = 0.20  # widest acceptable model probability range (uncertainty)
+    blocked_regimes: str = "HIGH_VOLATILITY,INSUFFICIENT_DATA"
+    max_late_move_cents: float = 15.0  # our side already up this much in 5 min -> needs 2x the edge
+    max_consecutive_losses: int = 3  # pause new trades after this many losses in a row ...
+    streak_pause_sec: int = 3600  # ... for this long after the last loss
+    kelly_fraction: float = 0.2  # cap stake at this fraction of full Kelly (on the conservative probability)
+
+    @property
+    def regimes_blocked(self) -> frozenset[str]:
+        return frozenset(r.strip().upper() for r in self.blocked_regimes.split(",") if r.strip())
 
     @property
     def grades(self) -> frozenset[str]:
@@ -113,7 +133,7 @@ class RiskProfile:
 
 
 def _cast(name: str, v: Any) -> Any:
-    if name == "allowed_grades":
+    if name in ("allowed_grades", "blocked_regimes"):
         return str(v)
     if name == "require_known_ev":
         return v if isinstance(v, bool) else str(v).lower() in ("1", "true", "yes")
@@ -128,6 +148,9 @@ DEFAULT_PROFILES: dict[RiskLevel, dict[str, Any]] = {
         min_entry_price_cents=10, max_entry_price_cents=85, max_balance_fraction=0.02,
         min_signal_quality=85, allowed_grades="A+,A", min_stability=0.8, max_soft_flags=0,
         min_ev_cents=3.0, require_known_ev=True,
+        min_btc_strength=55, max_prob_width=0.15, max_late_move_cents=12,
+        blocked_regimes="HIGH_VOLATILITY,RAPID_REVERSAL,INSUFFICIENT_DATA",
+        max_consecutive_losses=2, streak_pause_sec=3600, kelly_fraction=0.10,
     ),
     RiskLevel.MEDIUM: dict(
         min_confidence=70, max_position_usd=15, max_open_positions=2, max_daily_loss_usd=30,
@@ -136,6 +159,9 @@ DEFAULT_PROFILES: dict[RiskLevel, dict[str, Any]] = {
         min_entry_price_cents=8, max_entry_price_cents=90, max_balance_fraction=0.05,
         min_signal_quality=75, allowed_grades="A+,A,B", min_stability=0.6, max_soft_flags=1,
         min_ev_cents=2.0, require_known_ev=True,
+        min_btc_strength=45, max_prob_width=0.20, max_late_move_cents=15,
+        blocked_regimes="HIGH_VOLATILITY,INSUFFICIENT_DATA",
+        max_consecutive_losses=3, streak_pause_sec=2700, kelly_fraction=0.20,
     ),
     RiskLevel.HIGH: dict(
         min_confidence=60, max_position_usd=30, max_open_positions=3, max_daily_loss_usd=60,
@@ -144,6 +170,9 @@ DEFAULT_PROFILES: dict[RiskLevel, dict[str, Any]] = {
         min_entry_price_cents=5, max_entry_price_cents=95, max_balance_fraction=0.10,
         min_signal_quality=65, allowed_grades="A+,A,B", min_stability=0.5, max_soft_flags=2,
         min_ev_cents=1.0, require_known_ev=False,
+        min_btc_strength=35, max_prob_width=0.25, max_late_move_cents=20,
+        blocked_regimes="INSUFFICIENT_DATA",
+        max_consecutive_losses=4, streak_pause_sec=1800, kelly_fraction=0.25,
     ),
 }
 
@@ -170,6 +199,13 @@ class _ProfileEnv(BaseSettings):
     max_soft_flags: int | None = None
     min_ev_cents: float | None = None
     require_known_ev: bool | None = None
+    min_btc_strength: int | None = None
+    max_prob_width: float | None = None
+    blocked_regimes: str | None = None
+    max_late_move_cents: float | None = None
+    max_consecutive_losses: int | None = None
+    streak_pause_sec: int | None = None
+    kelly_fraction: float | None = None
 
 
 def load_profiles(read_env: bool = True) -> dict[RiskLevel, RiskProfile]:

@@ -83,6 +83,10 @@ class CoinbaseSpotProvider:
 
 
 def build_provider(name: str) -> UnderlyingPriceProvider:
+    if name == "coinbase_exchange":
+        from app.data.btc_feed import BTCFeed
+
+        return BTCFeed()  # type: ignore[return-value]
     if name == "coinbase":
         return CoinbaseSpotProvider()
     return NullUnderlyingProvider()

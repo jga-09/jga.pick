@@ -24,7 +24,9 @@ ADMIN_ID = 4242
 
 
 def make_settings(**kw: Any) -> Settings:
+    # Existing suites test the multi-asset "quality" engine; BTC-engine tests opt in with strategy_mode="btc".
     base: dict[str, Any] = dict(_env_file=None, data_source="fixture", database_url="sqlite://",
+                                strategy_mode="quality", assets="BTC,ETH,SOL",
                                 telegram_admin_ids=str(ADMIN_ID), telegram_bot_token="1234567890:FAKEfakeFAKEfakeFAKEfakeFAKEfake123")
     base.update(kw)
     return Settings(**base)

@@ -62,6 +62,10 @@ def _pct(v: float | None) -> str:
 
 # -------------------------------------------------------------------- home
 def home(rt: BotRuntime) -> Screen:
+    if rt.btc_mode:
+        from app.telegram import btc_views
+
+        return btc_views.home(rt)
     st = rt.state
     h = rt.health()
     run = "🔴 Stopped" if not st.running else ("⏸ Paused" if st.paused else "🟢 Running")
@@ -141,6 +145,10 @@ def _time_window(rt: BotRuntime, bucket: str) -> str:
 
 
 def signal_card(rt: BotRuntime, ticker: str) -> Screen:
+    if rt.btc_mode:
+        from app.telegram import btc_views
+
+        return btc_views.signal(rt)
     view = rt.view(ticker)
     if view is None or view.snapshot is None:
         return Screen("⚪ No data for this market yet.", [[("🔄 Refresh", f"mkt:{ticker}"), ("🔙 Back", "signals")]],
@@ -274,6 +282,7 @@ def status(rt: BotRuntime) -> Screen:
         "Telegram: 🟢 CONNECTED",
         f"Kalshi: {kalshi}",
         f"Market Data: {md}",
+        *(btc_status_lines(rt) if rt.btc_mode else []),
         f"Signal Engine: {_dot(st.running, 'ACTIVE', 'IDLE')}",
         "Risk Manager: 🟢 ACTIVE",
         f"Trade Engine: {mode_badge(st.mode)}{' · 🔴 BLOCKED' if not st.trading_allowed else ''}",
@@ -292,8 +301,28 @@ def status(rt: BotRuntime) -> Screen:
     return Screen("\n".join(lines), [[("🔄 Refresh", "status"), BACK]], route="status", refreshable=True)
 
 
+def btc_status_lines(rt: BotRuntime) -> list[str]:
+    from app.telegram import btc_views
+
+    return btc_views.status_lines(rt)
+
+
 # -------------------------------------------------------------------- risk
-def profile_params(p: RiskProfile) -> list[str]:
+def profile_params(p: RiskProfile, btc: bool = False) -> list[str]:
+    if btc:
+        return [
+            f"Min net edge: {p.min_ev_cents:+g}¢/contract",
+            f"Min signal strength: {p.min_btc_strength}",
+            f"Max uncertainty: {p.max_prob_width * 100:.0f} pts",
+            f"Max Position: ${p.max_position_usd:g} · Max exposure ${p.max_total_exposure_usd:g}",
+            f"Max Open: {p.max_open_positions}",
+            f"Daily Loss Limit: ${p.max_daily_loss_usd:g}",
+            f"Max Spread: {p.max_spread_cents:g}¢ · Min liquidity {p.min_liquidity_contracts:g}",
+            f"Min Time: {p.min_time_remaining_sec} sec",
+            f"Cooldown: {p.trade_cooldown_sec}s/market · pause after {p.max_consecutive_losses} losses",
+            f"Blocked regimes: {', '.join(sorted(p.regimes_blocked)) or 'none'}",
+            f"Calibration required: {'yes' if p.require_known_ev else 'paper may trade while collecting'}",
+        ]
     return [
         f"Confidence: ≥ {p.min_confidence}",
         f"Max Position: ${p.max_position_usd:g}",
@@ -309,7 +338,7 @@ def profile_params(p: RiskProfile) -> list[str]:
 def risk_menu(rt: BotRuntime) -> Screen:
     st = rt.state
     lines = ["🛡 <b>TRADING RISK</b>", "", "Current:", st.risk_level.badge, "", "Select:", "", SEP, "",
-             "CURRENT PARAMETERS", "", *profile_params(rt.profile())]
+             "CURRENT PARAMETERS", "", *profile_params(rt.profile(), rt.btc_mode)]
     buttons = [[(lvl.badge, f"rset:{lvl.value}")] for lvl in RiskLevel]
     buttons += [[("⚙️ Customize", "rcust"), BACK]]
     return Screen("\n".join(lines), buttons, route="risk")
@@ -327,7 +356,8 @@ def risk_confirm(rt: BotRuntime, new: RiskLevel) -> Screen:
     cur = rt.state.risk_level
     lines = ["⚠️ <b>CHANGE RISK LEVEL</b>", "", "Current:", cur.badge, "", "New:", new.badge, "",
              f"{new.title} allows:", *[f"• {e}" for e in RISK_EFFECTS[new]], "",
-             *profile_params(rt.profile(new)), "", "<i>Risk level does not change paper/live mode.</i>"]
+             *profile_params(rt.profile(new), rt.btc_mode), "",
+             "<i>Risk level does not change paper/live mode and never enables real-money trading.</i>"]
     return Screen("\n".join(lines), [[("✅ Confirm", f"rok:{new.value}"), ("❌ Cancel", "risk")]], route="risk")
 
 
@@ -340,12 +370,14 @@ RISK_FIELDS: dict[str, tuple[str, str, float]] = {
     "time": ("min_time_remaining_sec", "Min Time s", 30),
     "spr": ("max_spread_cents", "Max Spread ¢", 1),
     "qual": ("min_signal_quality", "Quality", 5),
+    "ev": ("min_ev_cents", "Min edge ¢", 1),
+    "str": ("min_btc_strength", "Strength", 5),
 }
 
 
 def risk_customize(rt: BotRuntime, note: str = "") -> Screen:
     p = rt.profile()
-    lines = [f"⚙️ <b>CUSTOMIZE {p.level.badge}</b>", "", *profile_params(p),
+    lines = [f"⚙️ <b>CUSTOMIZE {p.level.badge}</b>", "", *profile_params(p, rt.btc_mode),
              f"Max Exposure: ${p.max_total_exposure_usd:g}", "",
              "<i>Hard safety limits apply to every profile.</i>"]
     if note:
@@ -452,6 +484,10 @@ def history(rt: BotRuntime, period: str) -> Screen:
 
 # ---------------------------------------------------------------- strategy
 def strategy(rt: BotRuntime) -> Screen:
+    if rt.btc_mode:
+        from app.telegram import btc_views
+
+        return btc_views.strategy(rt)
     st, p = rt.state, rt.profile()
     und = rt.underlying.name
     lines = [
@@ -641,7 +677,8 @@ def unauthorized() -> Screen:
 def help_text() -> str:
     return "\n".join([
         f"📡 <b>{APP_NAME} — commands</b>", "",
-        "/menu — dashboard", "/status — bot status", "/markets — active markets",
+        "/menu — dashboard", "/btc — BTC 15-min signal", "/analytics — performance & calibration",
+        "/backtest — last backtest report", "/calibration — model calibration", "/status — bot status", "/markets — active markets",
         "/signals — current signals", "/risk — risk profile", "/config — configuration",
         "/positions — open positions", "/trades — recent trades", "/pnl — today's P&L",
         "/history — performance", "/strategy — strategy info", "/pause · /resume — trading",

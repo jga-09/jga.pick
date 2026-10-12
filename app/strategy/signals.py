@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from app.strategy.quality import SetupAnalysis
@@ -59,6 +59,7 @@ class SignalResult:
     validity: Validity = Validity.VALID
     threshold: int = 0
     analysis: SetupAnalysis | None = None
+    btc: Any = None  # app.strategy.btc_decision.BTCSignal when STRATEGY_MODE=btc
 
     @property
     def quality(self) -> int | None:

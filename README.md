@@ -1,5 +1,11 @@
 # 📡 JGAPicksBot — Kalshi 15-Minute Directional Trading Bot
 
+> **Default engine: Bitcoin only (`STRATEGY_MODE=btc`).** The bot prices each Kalshi BTC 15-minute contract
+> with a volatility model, compares that probability with the executable ask after fees and slippage,
+> and trades only when a conservative net edge survives a list of no-trade checks. See
+> [15c](#15c-btc-15-minute-engine-strategy_modebtc). The multi-asset engine described below is still available
+> with `STRATEGY_MODE=quality`.
+
 A Telegram-controlled bot that discovers Kalshi short-duration (15-minute) markets, scores them
 **🟢 UP / 🔴 DOWN / ⚪ WAIT** with a 0–100 confidence, checks every trade against a
 **🟢 LOW / 🟡 MEDIUM / 🔴 HIGH** risk profile, and executes in **PAPER mode by default**.
@@ -61,7 +67,7 @@ app/
   database/          SQLAlchemy models, engine, repository
   data/underlying.py optional spot-price providers (none | coinbase)
   utils/             logging (redaction), retry/backoff/rate limit, time helpers
-tests/               pytest suite (68 tests)
+tests/               pytest suite (173 tests)
 scripts/smoke_test.py  end-to-end demo with fixture data
 ```
 
@@ -175,7 +181,7 @@ that only allows SSH. Logs: `journalctl -u jgapicks -f`. Update: `cd /home/bot/j
 ## 14. Testing
 
 ```bash
-python -m pytest -q             # 68 tests, no network, no credentials
+python -m pytest -q             # 173 tests, no network, no credentials
 python scripts/smoke_test.py    # end-to-end demo: dashboard, UP/DOWN/WAIT, risk, paper trade, P&L
 ```
 
@@ -259,6 +265,67 @@ previous-hour volatility) and buys only when Kalshi's ask is cheaper than that b
 slippage + a margin. It prints the Coinbase-vs-Kalshi settlement agreement, Brier accuracy of the model vs
 Kalshi's own prices, and a walk-forward test where the margin is picked on earlier days only. Run
 `python scripts/replay.py --days 14` first. It does not change the bot.
+
+## 15c. BTC 15-minute engine (`STRATEGY_MODE=btc`)
+
+```
+Kalshi discovery (BTC series only) → contract rules verified → Coinbase BTC-USD feed (ticker + 1-min bars)
+  → BTC features → regime → probability model (+ uncertainty) → net edge vs ASK → no-trade engine
+  → RiskManager (account limits) → position sizer → paper (default) / live (manual confirm only)
+```
+
+| Piece | File | What it does |
+|---|---|---|
+| Contract rules | `app/kalshi/contract.py` | Reads `strike_type`, strikes and the published rules text. YES/NO meaning, threshold, settlement source (BRTI) and averaging window. Missing rules, range contracts, unknown strike types or contradictions → **not verified → NO TRADE**. |
+| BTC feed | `app/data/btc_feed.py` | Coinbase Exchange ticker (exchange timestamp) + completed 1-minute bars. Rejects bad prints (≤0, crossed book, >5% jumps, future timestamps). Status CONNECTED / STALE / DISCONNECTED shown in Telegram. |
+| Features | `app/strategy/btc_model.py` | Momentum (1/3/5/15 min, z-scores, consistency), EMA trend/slope/reversal, acceleration state, volatility (σ, ratio, shocks), relative volume, highs/lows/breakouts, distance to threshold in σ, time. Only bars complete at decision time are used. |
+| Regime | same | STRONG UPTREND / STRONG DOWNTREND / SIDEWAYS / HIGH VOLATILITY / RAPID REVERSAL / INSUFFICIENT DATA. |
+| Probability | same | `P(YES)=Φ(ln(S/K)/(σ√T_eff))`, σ from the last 60 one-minute returns, `T_eff = T−W+W/3` for a W-second settlement average. A range from σ sampling error and a Coinbase↔BRTI basis; **decisions use the conservative end**. No fitted parameters, so every prediction is out-of-sample. |
+| Decision | `app/strategy/btc_decision.py` | 🟢 UP / 🔴 DOWN / ⚪ NO TRADE, 0-100 strength (labelled as not a probability), supporting/conflicting factors, net edge, data age, named rejection reasons. |
+| Calibration | `app/research/btc_calibration.py` | Every evaluation stored per market-minute and labelled with the real result. Buckets 50-60…90-100%, ECE, Brier vs Kalshi's own price. "⚠️ MODEL NOT YET CALIBRATED" until enough markets. |
+| Backtest | `app/research/btc_backtest.py` | Replays cached settled markets through the same code with chronological train → validation → test walk-forward. Compares baseline, momentum (+trend / +volatility / +Kalshi price / +model), model + net edge, full strategy and filter ablations. |
+
+**Net expected value per contract** (cents), buying side `s` at its ask `A`:
+
+```
+cost     = A + slippage + FEE_RATE·A·(1−A)·100        (Kalshi's fee formula, A in dollars)
+EV_point = 100·P(s wins)     − cost
+EV_low   = 100·P_low(s wins) − cost       ← must be ≥ the profile's MIN_EV_CENTS
+```
+
+After sizing, the edge is re-checked with the exact rounded-up fee for that order size at the worst-case
+limit price. A binary can lose its whole cost, so every sizing budget is a loss budget: profile max,
+exposure, balance fraction, remaining daily loss, and a fractional-Kelly cap on the conservative probability.
+
+**NO TRADE reasons** (most important shown in Telegram, all logged and stored): trading paused · market
+data stale / BTC and Kalshi not synchronised · settlement conditions not verified · insufficient time
+(incl. inside the settlement averaging window) · daily loss limit · position limit · excessive spread ·
+insufficient liquidity · unfavourable regime · excessive model uncertainty · BTC/Kalshi movement conflict ·
+price already reflects the move · weak directional evidence · insufficient expected value · insufficient
+historical evidence · probability poorly calibrated · losing-streak pause.
+
+**Calibration gate:** LOW and MEDIUM need a calibrated model to trade at all. HIGH may paper-trade while
+evidence is collected (labelled with a warning). **Live trading always requires a calibrated model**,
+`LIVE_TRADING=true` + `PAPER_TRADING=false`, an admin, valid credentials, and a manual confirmation of
+every order. Auto-trade is paper-only in this mode, and changing risk level never changes paper/live.
+
+### Research workflow (BTC)
+
+```bash
+python scripts/replay.py --days 30     # download settled Kalshi BTC 15-min markets + Coinbase 1-min bars (cached)
+python scripts/btc_backtest.py         # walk-forward backtest -> report + data/btc_backtest_report.json
+python scripts/btc_simulate.py         # SYNTHETIC check that the backtest finds no fake edge / finds a planted one
+python scripts/smoke_test.py           # end-to-end demo incl. a BTC NO TRADE, an approved paper trade and settlement
+```
+
+Telegram: **₿ BTC Signal** (detailed card, 🧠 Why?, 📋 Checklist), **📈 Analytics** (paper and live kept
+separate, fees, profit factor, drawdown, streaks, calibration), **🧪 Backtest** (last saved report),
+`/btc`, `/analytics`, `/backtest`, `/calibration`.
+
+**Known limitations:** Kalshi keeps no order-book history, so backtests cannot check liquidity and use
+1-minute quotes. Coinbase is a proxy for the BRTI settlement index. Older cached markets may lack rules
+text (a 60-second average is assumed and reported). All thresholds are a-priori defaults. Change them only
+when out-of-sample backtests and paper results support it.
 
 ## 16. Enabling live trading (deliberately)
 
