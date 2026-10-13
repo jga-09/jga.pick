@@ -270,6 +270,7 @@ def test_good_setup_is_approved() -> None:
     (dict(kalshi_move_5m=-12.0), {"conflict_mom_z": -1.0}, NoTrade.CONFLICT),
     (dict(kalshi_move_5m=25.0), {"min_ev_cents": 20.0}, NoTrade.PRICE_REFLECTS_MOVE),
     ({}, {"min_strength": 101}, NoTrade.WEAK_DIRECTION),
+    ({}, {"min_entry_cents": 95.0}, NoTrade.LONGSHOT),
     (dict(yes_ask=99, yes_bid=97), {}, NoTrade.INSUFFICIENT_EV),
     (dict(calibration=CalibrationState("INSUFFICIENT", 4)), {}, NoTrade.INSUFFICIENT_EVIDENCE),
     (dict(calibration=CalibrationState("NOT_CALIBRATED", 80, 0.12)), {}, NoTrade.NOT_CALIBRATED),
@@ -540,3 +541,11 @@ def test_trade_cards_layout():
     out = M.trade_closed_alert(pos(status="closed", exit_price=91.0, realized_pnl=0.44, close_reason="manual exit"),
                                "DOWN")
     assert "CASHED OUT" in out and "sold @ 91¢" in out and "Locked in" in out
+
+
+def test_longshot_guard_blocks_cheap_contracts():
+    from app.risk.profiles import RiskLevel, load_profiles
+
+    profiles = load_profiles(read_env=False)
+    assert profiles[RiskLevel.LOW].min_entry_price_cents >= 30
+    assert profiles[RiskLevel.HIGH].min_entry_price_cents >= 15

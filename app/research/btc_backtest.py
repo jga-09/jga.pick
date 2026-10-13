@@ -545,6 +545,7 @@ def run(ds: Dataset, costs: SimCosts | None = None, capital: float = 100.0, trai
         wf("full - late-entry filter", v_full(replace(prm, max_late_move_cents=1e9)), EDGE_GRID, require_calibration=need_cal),
         wf("full - regime filter", v_full(replace(prm, blocked_regimes=frozenset({"INSUFFICIENT_DATA"}))), EDGE_GRID, require_calibration=need_cal),
         wf("full - strength filter", v_full(replace(prm, min_strength=0)), EDGE_GRID, require_calibration=need_cal),
+        wf("full - longshot guard", v_full(replace(prm, min_entry_cents=1.0)), EDGE_GRID, require_calibration=need_cal),
     ]
     res = {v.name: v for v in variants}
     days = ds.days
@@ -579,6 +580,7 @@ def run(ds: Dataset, costs: SimCosts | None = None, capital: float = 100.0, trai
         ("late-entry filter", "full strategy", "full - late-entry filter"),
         ("regime filter", "full strategy", "full - regime filter"),
         ("strength filter", "full strategy", "full - strength filter"),
+        ("longshot guard", "full strategy", "full - longshot guard"),
     ]
     comp = []
     for label, a, b in comparisons:

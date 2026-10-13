@@ -41,6 +41,7 @@ class NoTrade(StrEnum):
     CONFLICT = "BTC and Kalshi movement conflict"
     PRICE_REFLECTS_MOVE = "Current price already reflects the move"
     WEAK_DIRECTION = "Weak directional evidence"
+    LONGSHOT = "Long-shot contract (cheap contracts lose money on average)"
     INSUFFICIENT_EV = "Insufficient expected value"
     INSUFFICIENT_EVIDENCE = "Insufficient historical evidence"
     NOT_CALIBRATED = "Probability estimate poorly calibrated"
@@ -301,9 +302,12 @@ def decide(inp: BTCInputs, prm: BTCParams) -> BTCSignal:
         liq = inp.liquidity.get(best.side)
         if liq is not None and liq < prm.min_liquidity:
             no(NoTrade.INSUFFICIENT_LIQUIDITY, f"{liq:.0f} < {prm.min_liquidity:.0f} contracts at the ask")
-        if not prm.min_entry_cents <= best.ask <= prm.max_entry_cents:
-            no(NoTrade.INSUFFICIENT_EV, f"entry {best.ask:.0f}¢ outside {prm.min_entry_cents:.0f}-"
-                                        f"{prm.max_entry_cents:.0f}¢")
+        if best.ask < prm.min_entry_cents:
+            # Kalshi-wide data (Bürgi, Deng & Whelan 2025): cheap contracts lose heavily on average,
+            # especially for takers, so the model's "edge" there is more likely model error.
+            no(NoTrade.LONGSHOT, f"entry {best.ask:.0f}¢ < {prm.min_entry_cents:.0f}¢ minimum")
+        elif best.ask > prm.max_entry_cents:
+            no(NoTrade.INSUFFICIENT_EV, f"entry {best.ask:.0f}¢ > {prm.max_entry_cents:.0f}¢ maximum")
 
     # ---- regime & uncertainty ---------------------------------------------
     if inp.regime.value in prm.blocked_regimes:

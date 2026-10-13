@@ -46,6 +46,7 @@ FRIENDLY: dict[NoTrade, str] = {
     NoTrade.CONFLICT: "BTC and the Kalshi price disagree",
     NoTrade.PRICE_REFLECTS_MOVE: "The price already moved - too late to get in",
     NoTrade.WEAK_DIRECTION: "BTC isn't moving clearly in one direction",
+    NoTrade.LONGSHOT: "Cheap long-shot contract - on Kalshi these lose money on average",
     NoTrade.INSUFFICIENT_EV: "Price is too high for the odds (not enough profit after fees)",
     NoTrade.INSUFFICIENT_EVIDENCE: "Still learning - needs more finished markets first",
     NoTrade.NOT_CALIBRATED: "The bot's odds haven't proven accurate yet",
@@ -556,6 +557,7 @@ COMPONENTS = {
     "late-entry filter": "Too-late-to-enter check",
     "regime filter": "Market-mood filter",
     "strength filter": "Signal-strength filter",
+    "longshot guard": "Skip cheap long-shots",
 }
 
 
