@@ -259,6 +259,10 @@ def _dot(ok: bool, yes: str, no: str) -> str:
 
 
 def status(rt: BotRuntime) -> Screen:
+    if rt.btc_mode:
+        from app.telegram import btc_views
+
+        return btc_views.status(rt)
     st, h = rt.state, rt.health()
     view = rt.focus_view()
     stats = rt.portfolio.stats(st.mode, days=0)
@@ -391,6 +395,10 @@ def risk_customize(rt: BotRuntime, note: str = "") -> Screen:
 
 # ------------------------------------------------------------------ trades
 def trades(rt: BotRuntime, page: int = 0, per_page: int = 5) -> Screen:
+    if rt.btc_mode:
+        from app.telegram import btc_views
+
+        return btc_views.trades(rt, page)
     mode = rt.state.mode
     rows = rt.repo.closed_positions(mode=mode, limit=per_page, offset=page * per_page)
     total = rt.repo.count_closed(mode)
@@ -531,6 +539,10 @@ def indicators(rt: BotRuntime) -> Screen:
 
 # ------------------------------------------------------------------ config
 def config(rt: BotRuntime) -> Screen:
+    if rt.btc_mode:
+        from app.telegram import btc_views
+
+        return btc_views.settings(rt)
     st, p = rt.state, rt.profile()
     lines = [
         "⚙️ <b>CONFIGURATION</b>", "",
@@ -620,28 +632,31 @@ def live_mode_confirm() -> Screen:
 
 # ----------------------------------------------------------- trade tickets
 def ticket_screen(t: TradeTicket) -> Screen:
-    d = Direction(t.direction)
-    action = f"BUY {t.side.upper()}"
+    payout = money(t.contracts * 1.0, False)
+    body = [
+        escape(t.label),
+        f"<b>Buy {t.side.upper()}</b> · {t.contracts} contracts",
+        f"Price: {cents(t.quoted_price_cents)} each (pays at most {cents(t.limit_price_cents)})",
+        f"Cost: up to {money(t.max_cost, False)} incl. fees",
+        f"If {t.side.upper()} wins you get {payout}; if it loses you lose the cost.",
+        f"Risk level: {RiskLevel(t.risk_level).badge}",
+    ]
     if t.mode == "live":
-        lines = ["⚠️ <b>LIVE TRADE CONFIRMATION</b>", "", escape(t.label), "", "Signal:", f"{d.emoji} {d.value}", "",
-                 "Action:", action, "", "Price:", f"{cents(t.quoted_price_cents)} (limit {cents(t.limit_price_cents)})", "", "Contracts:", str(t.contracts), "",
-                 "Maximum Cost:", money(t.max_cost, False), "", "Risk:", RiskLevel(t.risk_level).badge, "",
-                 "<i>Expires in 60s. Risk is re-checked before submission.</i>"]
-        buttons = [[("✅ CONFIRM LIVE TRADE", f"tok:{t.id}")], [("❌ CANCEL", f"tno:{t.id}")]]
+        lines = ["⚠️ <b>REAL-MONEY ORDER</b>", "", *body, "",
+                 "<i>Uses real money on Kalshi. Expires in 60 seconds; risk is re-checked before sending.</i>"]
+        buttons = [[("✅ Confirm real-money order", f"tok:{t.id}")], [("❌ Cancel", f"tno:{t.id}")]]
     else:
-        lines = ["📝 <b>PAPER TRADE</b>", "", escape(t.label), "", "Direction:", f"{d.emoji} {d.value}", "",
-                 "Action:", action, "", "Entry:", f"{cents(t.quoted_price_cents)} (max {cents(t.limit_price_cents)})", "", "Contracts:", str(t.contracts), "",
-                 "Cost:", f"≤ {money(t.max_cost, False)} incl. est. fee", "",
-                 "Risk:", RiskLevel(t.risk_level).badge]
-        buttons = [[("✅ PAPER BUY", f"tok:{t.id}"), ("❌ CANCEL", f"tno:{t.id}")]]
+        lines = ["📝 <b>PAPER TRADE</b> <i>(practice money)</i>", "", *body]
+        buttons = [[("✅ Confirm", f"tok:{t.id}"), ("❌ Cancel", f"tno:{t.id}")]]
     return Screen("\n".join(lines), buttons, route="home")
 
 
 def trade_result(pos: Position) -> Screen:
-    head = "⚠️ <b>LIVE ORDER FILLED</b>" if pos.mode == "live" else "✅ <b>PAPER ORDER FILLED</b>"
-    text = (f"{head}\n\n{escape(pos.label)}\nBUY {pos.side.upper()} x{pos.contracts} @ {cents(pos.entry_price)}\n"
-            f"Cost: {money(pos.cost, False)} · Fee: {money(pos.entry_fee, False)}")
-    return Screen(text, [[("📂 Positions", "pos"), ("🏠 Home", "home")]], route="pos")
+    head = "⚠️ <b>REAL-MONEY ORDER FILLED</b>" if pos.mode == "live" else "✅ <b>PAPER TRADE FILLED</b>"
+    text = (f"{head}\n\n{escape(pos.label)}\nBought {pos.side.upper()} x{pos.contracts} @ {cents(pos.entry_price)}\n"
+            f"Cost {money(pos.cost, False)} + fees {money(pos.entry_fee, False)}\n"
+            f"Settles when the market closes - you'll get a message.")
+    return Screen(text, [[("💰 Trades", "trades:0"), ("🏠 Home", "home")]], route="pos")
 
 
 def notice(text: str, back: str = "home") -> Screen:

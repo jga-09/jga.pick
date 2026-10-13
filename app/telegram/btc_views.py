@@ -1,74 +1,210 @@
 """Telegram screens for the BTC 15-minute engine (STRATEGY_MODE=btc).
 
-Rules: never show a fabricated price or statistic (``N/A`` when unknown), never
-show an approved trade button when the RiskManager rejected the setup, and keep
-backtest / paper / live numbers strictly separate and labelled.
+Design rules:
+* Plain language first; technical numbers live behind "🧠 Full details".
+* Short screens, one idea per block, the decision in one line.
+* Buttons change with the bot's state (Start only when stopped, etc.).
+* Never show a fabricated price or statistic (``—`` when unknown), never offer a trade
+  button when the setup was rejected, and keep backtest / paper / live separate.
 """
 
 from __future__ import annotations
 
 import math
-from html import escape
+from datetime import datetime
+from html import escape as _html_escape
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo
 
-from app import APP_NAME
 from app.research.btc_backtest import load_report
-from app.telegram.keyboards import BACK, BTC_MENU, Button, Screen, grid
+from app.strategy.btc_decision import NoTrade
+from app.telegram.keyboards import Button, Screen
 from app.trading.positions import Position
-from app.utils.time import fmt_countdown
+from app.utils.time import utcnow
 
 if TYPE_CHECKING:
     from app.runtime import BotRuntime, MarketView
 
-SEP = "━━━━━━━━━━━━━━━━━━"
-NA = "N/A"
-SCORE_NOTE = "<i>Strength is a 0-100 evidence score, not a win probability.</i>"
+LINE = "━━━━━━━━━━━━━━"
+NA = "—"
+HOME: Button = ("🏠 Home", "home")
+NY = ZoneInfo("America/New_York")
+
+FRIENDLY: dict[NoTrade, str] = {
+    NoTrade.TRADING_PAUSED: "Trading is paused",
+    NoTrade.STALE_DATA: "Waiting for fresh price data",
+    NoTrade.SETTLEMENT_UNVERIFIED: "Couldn't confirm this market's rules",
+    NoTrade.INSUFFICIENT_TIME: "Too close to the end of the 15 minutes",
+    NoTrade.DAILY_LOSS: "Daily loss limit reached",
+    NoTrade.POSITION_LIMIT: "Already holding the maximum number of trades",
+    NoTrade.EXCESSIVE_SPREAD: "Buy and sell prices are too far apart",
+    NoTrade.INSUFFICIENT_LIQUIDITY: "Not enough contracts for sale at this price",
+    NoTrade.UNFAVORABLE_REGIME: "BTC is too choppy right now",
+    NoTrade.EXCESSIVE_UNCERTAINTY: "The bot isn't sure enough",
+    NoTrade.CONFLICT: "BTC and the Kalshi price disagree",
+    NoTrade.PRICE_REFLECTS_MOVE: "The price already moved - too late to get in",
+    NoTrade.WEAK_DIRECTION: "BTC isn't moving clearly in one direction",
+    NoTrade.INSUFFICIENT_EV: "Price is too high for the odds (not enough profit after fees)",
+    NoTrade.INSUFFICIENT_EVIDENCE: "Still learning - needs more finished markets first",
+    NoTrade.NOT_CALIBRATED: "The bot's odds haven't proven accurate yet",
+}
+# RiskManager account checks are plain strings; map them by keyword.
+_ACCOUNT = (
+    ("bot stopped", "Bot is stopped - tap ▶️ Start"),
+    ("EMERGENCY", "Emergency stop is on"),
+    ("trading paused", "Trading is paused"),
+    ("Daily loss limit", "Daily loss limit reached - resting until tomorrow"),
+    ("Max open positions", "Already holding the maximum number of trades"),
+    ("Max exposure", "Money-at-risk limit reached"),
+    ("Already holding", "Already in this market"),
+    ("in flight", "An order for this market is already being processed"),
+    ("losses in a row", "Taking a break after a losing streak"),
+    ("cooldown", "Short pause after a recent trade"),
+    ("Position size is zero", "Trade would be too small for your limits"),
+    ("after exact fees", "Price is too high for the odds (not enough profit after fees)"),
+    ("not permitted", "This mode isn't allowed by the bot's settings"),
+)
+
+
+# ------------------------------------------------------------------ helpers
+def escape(text: str) -> str:
+    return _html_escape(text, quote=False)  # keep apostrophes readable
+
+
+def _n(k: int, word: str) -> str:
+    return f"{k} {word}{'' if k == 1 else 's'}"
+
+
+def _big(v: float | None) -> str:
+    """BTC-sized dollar amounts without cents ($60,300)."""
+    return NA if v is None else f"${v:,.0f}"
 
 
 def _usd(v: float | None, signed: bool = True) -> str:
     if v is None:
         return NA
-    sign = ("+" if v > 0 else "-" if v < 0 else "") if signed else ""
-    return f"{sign}${abs(v):,.2f}"
+    if not signed or abs(v) < 0.005:
+        return f"${abs(v):,.2f}"
+    return f"{'+' if v > 0 else '-'}${abs(v):,.2f}"
 
 
 def _c(v: float | None) -> str:
-    return NA if v is None else (f"{v:.0f}¢" if abs(v - round(v)) < 0.05 else f"{v:.1f}¢")
+    return NA if v is None else f"{v:.0f}¢"
 
 
-def _pct(v: float | None, digits: int = 0) -> str:
-    return NA if v is None else f"{v * 100:.{digits}f}%"
+def _pct(v: float | None) -> str:
+    return NA if v is None else f"{v * 100:.0f}%"
 
 
-def _dot(ok: bool | None, yes: str, no: str) -> str:
-    return f"🟢 {yes}" if ok else f"🔴 {no}"
+def _left(seconds: float) -> str:
+    s = max(0, int(seconds))
+    return f"{s // 60}m {s % 60:02d}s"
+
+
+def _clock(dt: datetime) -> str:
+    return dt.astimezone(NY).strftime("%-I:%M %p ET")
+
+
+def _bar(frac: float, width: int = 10) -> str:
+    n = max(0, min(width, round(frac * width)))
+    return "▰" * n + "▱" * (width - n)
+
+
+def grid2(buttons: list[Button]) -> list[list[Button]]:
+    return [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+
+
+def friendly(text: str, btc: Any = None) -> str:
+    if btc is not None:
+        for r in btc.rejections:
+            if r.text == text:
+                return FRIENDLY.get(r.code, r.code.value)
+    for key, nice in _ACCOUNT:
+        if key.lower() in text.lower():
+            return nice
+    return text.split(":")[0]
+
+
+def reasons(btc: Any, decision: Any, limit: int = 3) -> list[str]:
+    raw = list(decision.failures) if decision is not None else [r.text for r in btc.rejections if r.critical]
+    out: list[str] = []
+    for t in raw:
+        nice = friendly(t, btc)
+        if nice not in out:
+            out.append(nice)
+    return out[:limit]
 
 
 def btc_view(rt: BotRuntime) -> MarketView | None:
-    for v in rt.markets():
-        if v.info.asset == "BTC":
-            return v
-    return None
+    return next((v for v in rt.markets() if v.info.asset == "BTC"), None)
 
 
-def _statuses(rt: BotRuntime) -> list[str]:
+def _question(b: Any, v: MarketView) -> str:
+    t = b.terms if b else None
+    when = _clock(v.info.close_time)
+    if t is None or t.threshold is None or t.kind is None:
+        return f"BTC market closing {when}"
+    word = "above" if t.kind == "above" else "below"
+    return f"Will BTC be {word} <b>{_big(t.threshold)}</b> at {when}?"
+
+
+def _btc_vs_target(b: Any) -> str:
+    f = b.features
+    if f.spot is None or b.terms.threshold is None:
+        return f"BTC {_big(f.spot)}"
+    diff = f.spot - b.terms.threshold
+    if abs(diff) < 0.5:
+        return f"BTC {_big(f.spot)} · right at the target"
+    return f"BTC {_big(f.spot)} · {_big(abs(diff))} {'above' if diff > 0 else 'below'} target"
+
+
+def _dot(ok: bool | None) -> str:
+    return "🟢" if ok else "🔴"
+
+
+def _feeds(rt: BotRuntime) -> tuple[str, str]:
     st, h = rt.state, rt.health()
-    bot = ("🚨 E-STOP" if st.emergency_stop else "⏸ PAUSED" if st.paused and st.running
-           else _dot(st.running, "RUNNING", "STOPPED"))
     if h["fixture"]:
-        kalshi = "🧪 FIXTURE"
-    elif h["auth_failed"]:
-        kalshi = "🔴 AUTH FAILED"
+        kalshi = "🧪"
     elif not st.running:
-        kalshi = "⚪ IDLE"
+        kalshi = "⚪"
     else:
-        kalshi = _dot(h["kalshi"] and h["live_data"], "CONNECTED", "DISCONNECTED")
+        kalshi = _dot(h["kalshi"] and h["live_data"] and not h["auth_failed"])
     feed = h.get("btc_feed")
-    btc = feed.badge if feed is not None else "⚪ NOT CONFIGURED"
-    if feed is not None and not st.running and feed.state == "DOWN" and feed.last_ts is None:
-        btc = "⚪ IDLE"
-    return ["📡 <b>BTC DIRECTIONAL BOT</b>", f"Bot: {bot}", f"Kalshi: {kalshi}", f"BTC Feed: {btc}"]
+    if feed is None:
+        btc = "⚪"
+    elif feed.state == "FIXTURE":
+        btc = "🧪"
+    elif not st.running and feed.last_ts is None:
+        btc = "⚪"
+    else:
+        btc = {"CONNECTED": "🟢", "STALE": "🟡"}.get(feed.state, "🔴")
+    return kalshi, btc
+
+
+def _state_line(rt: BotRuntime) -> str:
+    st = rt.state
+    if st.emergency_stop:
+        return "🚨 Emergency stop"
+    if not st.running:
+        return "⚪ Stopped"
+    return "⏸ Paused" if st.paused else "🟢 Running"
+
+
+def _mode(rt: BotRuntime) -> str:
+    return "💵 Real money" if rt.state.mode == "live" else "📝 Paper"
+
+
+def _control_buttons(rt: BotRuntime) -> list[list[Button]]:
+    st = rt.state
+    if st.emergency_stop:
+        return [[("🔓 Turn off emergency stop", "estop")]]
+    if not st.running:
+        row = [("▶️ Start", "start")]
+    else:
+        row = [("▶️ Resume", "resume") if st.paused else ("⏸ Pause", "pause"), ("🛑 Stop", "stop")]
+    return [row, [("🚨 Emergency stop", "estop")]]
 
 
 # ------------------------------------------------------------------ home
@@ -77,155 +213,149 @@ def home(rt: BotRuntime) -> Screen:
     v = btc_view(rt)
     b = v.signal.btc if v and v.signal else None
     d = v.decision if v else None
-    approved = bool(d and d.approved and b is not None)
-    lines = [*_statuses(rt), "", SEP, "", "₿ <b>BITCOIN · 15 MIN</b>", ""]
-    spot = b.features.spot if b else None
-    lines += [
-        f"BTC Price: {_usd(spot, signed=False)}",
-        f"Market: {escape(v.info.ticker) if v else 'searching…'}",
-        f"Reference: {_usd(b.terms.threshold, signed=False) if b and b.terms.threshold else NA}",
-        f"Time Left: {fmt_countdown(v.info.time_remaining()) if v else NA}",
-        "",
+    kalshi, btc_feed = _feeds(rt)
+    lines = [
+        f"📡 <b>BTC Bot</b> · {_state_line(rt)}",
+        f"{_mode(rt)} · {st.risk_level.emoji} {st.risk_level.value.title()} risk · "
+        f"🤖 Auto {'on' if st.auto_trade else 'off'}",
+        f"Kalshi {kalshi}   BTC price {btc_feed}",
+        LINE,
     ]
-    if b is None:
-        lines += ["Signal: ⚪ WAIT", "", "Press 🟢 Start to begin." if not st.running else "Collecting data…"]
+    if v is None:
+        lines += ["🔍 Looking for the next BTC 15-minute market…" if st.running else "Tap ▶️ Start to begin."]
     else:
-        e = b.edge
-        signal = b.label.replace("NO TRADE", "WAIT") if approved else "⚪ WAIT"
-        model = (f"{_pct(e.p_point)} ({'calibrated' if b.calibration.calibrated else 'uncalibrated'})"
-                 if e else NA)
-        lines += [
-            f"Signal: {signal}",
-            "",
-            f"Model Estimate: {model}",
-            f"Market Price: {f'{e.side.upper()} {_c(e.ask)}' if e else NA}",
-            f"Net Edge: {f'{e.ev_low_cents:+.1f}¢ (conservative)' if e else NA}",
-            "",
-            f"Regime: {b.regime.badge}",
-        ]
-    lines += [f"Risk: {st.risk_level.badge}", f"Mode: {'⚠️ LIVE' if st.mode == 'live' else '📝 PAPER'}", ""]
-    if b is not None:
-        lines += ["Decision:", "✅ TRADE APPROVED" if approved else "⚪ NO TRADE", "", "Reason:",
-                  escape(_reason(b, d))]
+        snap = v.snapshot
+        lines += [_question(b, v), f"⏱ {_left(v.info.time_remaining())} left"
+                  + (f" · YES {_c(snap.yes_ask)} · NO {_c(snap.no_ask)}" if snap else "")]
+        if b is not None:
+            lines.append(_btc_vs_target(b))
+        lines.append("")
+        if b is None:
+            lines.append("⏳ Collecting data…")
+        elif d is not None and d.approved and b.edge:
+            e = b.edge
+            lines += [f"{b.emoji} <b>Trade found: BUY {e.side.upper()} at {_c(e.ask)}</b>",
+                      f"Bot's odds {_pct(e.p_point)} · profit after fees ≈ {e.ev_low_cents:+.0f}¢ per contract"]
+        else:
+            why = reasons(b, d, 1)
+            lines += ["⚪ <b>No trade right now</b>", escape(why[0]) if why else "Waiting for a good setup"]
     s = rt.portfolio.stats(st.mode, days=0)
-    lines += ["", SEP, "", f"Today's Performance ({st.mode.upper()}):", f"Trades: {s.trades}",
-              f"Win Rate: {f'{s.win_rate:.0f}%' if s.win_rate is not None else NA}",
-              f"Net P&L: {_usd(s.realized)}", f"Fees: {_usd(s.fees, signed=False)}", "", SEP]
-    if st.emergency_stop:
-        lines.append("🚨 EMERGENCY STOP - all orders blocked")
-    buttons = list(BTC_MENU)
-    buttons += [("▶️ Resume", "resume") if st.paused else ("⏸ Pause", "pause"), ("🚨 E-Stop", "estop")]
-    return Screen("\n".join(lines), grid(buttons), route="home", refreshable=True)
+    today = f"Today: {_n(s.trades, 'trade')}"
+    if s.trades:
+        today += f" · {s.wins} won · {_usd(s.realized)}"
+    lines += [LINE, today]
+    buttons = grid2([("₿ Signal", "btc"), ("💰 Trades", "trades:0"), ("📈 Results", "banl"), ("⚙️ Settings", "cfg")])
+    return Screen("\n".join(lines), buttons + _control_buttons(rt), route="home", refreshable=True)
 
 
-def _reason(b: Any, d: Any) -> str:
-    if d is not None and d.approved:
-        e = b.edge
-        return (f"Model {_pct(e.p_low)}+ vs price {_c(e.ask)}: conservative net edge {e.ev_low_cents:+.1f}¢ "
-                f"after fees and slippage" if e else "All checks passed")
-    if d is not None and not d.approved:
-        return d.reason
-    return b.primary_reason or "waiting"
+# ------------------------------------------------------------------ signal
+def _moving(f: Any) -> str:
+    if f.ret_5m_bps is None:
+        return NA
+    pct = f.ret_5m_bps / 100
+    direction = "up" if pct > 0.005 else "down" if pct < -0.005 else "flat"
+    state = {"ACCELERATING_UP": "speeding up", "ACCELERATING_DOWN": "speeding up", "WEAKENING": "slowing down",
+             "REVERSING": "turning around", "STEADY": "steady"}.get(f.momentum_state, "")
+    move = f"{direction} {abs(pct):.2f}%" if direction != "flat" else "flat"
+    return f"{move}{f' · {state}' if state else ''}"
 
 
-# ------------------------------------------------------------------ signal screen
-def _label(v: float | None, pos: str, neg: str, flat: str, lim: float) -> str:
+def _level(v: float | None, lo: float, hi: float, words: tuple[str, str, str]) -> str:
     if v is None:
         return NA
-    if v >= lim:
-        return f"🟢 {pos} ({v:+.2f})"
-    if v <= -lim:
-        return f"🔴 {neg} ({v:+.2f})"
-    return f"⚪ {flat} ({v:+.2f})"
+    return words[0] if v < lo else words[2] if v > hi else words[1]
 
 
 def signal(rt: BotRuntime) -> Screen:
     v = btc_view(rt)
-    back = [[("🔄 Refresh", "btc"), ("🔙 Back", "home")]]
+    nav = [[("🔄 Refresh", "btc"), HOME]]
     if v is None or v.snapshot is None or v.signal is None or v.signal.btc is None:
-        return Screen("₿ No BTC 15-minute market data yet.\nThe scanner keeps checking automatically.", back,
-                      route="btc", refreshable=True)
+        return Screen("₿ <b>BTC SIGNAL</b>\n\nNo BTC 15-minute market data yet.\nThe bot keeps checking automatically.",
+                      nav, route="btc", refreshable=True)
     snap, b, d = v.snapshot, v.signal.btc, v.decision
-    approved = bool(d and d.approved)
+    approved = bool(d and d.approved and b.edge)
     f, e = b.features, b.edge
-    direction = b.label if approved else (f"⚪ NO TRADE (leaning {b.leaning})" if b.leaning != "WAIT" else "⚪ NO TRADE")
-    lines = [SEP, "₿ <b>BTC · 15 MIN</b>", SEP, "", f"<b>DIRECTION: {direction}</b>", "",
-             f"BTC Price: {_usd(f.spot, signed=False)}",
-             f"Contract: <code>{escape(v.info.ticker)}</code>",
-             f"YES means: {escape(b.terms.yes_means)}",
-             f"YES: {_c(snap.yes_ask)} · NO: {_c(snap.no_ask)} (ask)",
-             f"Time Remaining: {fmt_countdown(snap.time_remaining())}", "", SEP, ""]
-    mom = f"{f.ret_5m_bps:+.0f} bps / 5m ({f.mom_z_5m:+.1f}σ) · {f.momentum_state.replace('_', ' ').title()}" \
-        if f.ret_5m_bps is not None and f.mom_z_5m is not None else NA
-    vol = (f"{f.sigma_1m * 1e4:.1f} bps/min · ratio {f.vol_ratio:.2f}" + (" · SHOCK" if f.shock else "")
-           if f.sigma_1m is not None and f.vol_ratio is not None else NA)
-    volume = (f"{f.rel_volume:.1f}x normal" + (" · SPIKE" if f.volume_spike else "")
-              if f.rel_volume is not None else NA)
-    km = rt._kalshi_move(v.info.ticker, snap.ts)
-    model = NA
-    if b.p_yes is not None:
-        cal = "" if b.calibration.calibrated else " ⚠️ uncalibrated"
-        model = f"P(YES) {_pct(b.p_yes)} [{_pct(b.p_yes_low)}-{_pct(b.p_yes_high)}]{cal}"
+    trend = _level(f.trend_strength, -0.3, 0.3, ("down", "flat", "up"))
+    vol = _level(f.vol_ratio, 0.7, 1.4, ("calm", "normal", "wild"))
+    volume = _level(f.rel_volume, 0.6, 1.6, ("quiet", "normal", "busy"))
+    lines = [
+        "₿ <b>BTC 15-MIN SIGNAL</b>",
+        _question(b, v),
+        f"⏱ {_left(snap.time_remaining())} left",
+        "",
+        "<b>💵 Prices now</b>",
+        f"YES {_c(snap.yes_ask)} · NO {_c(snap.no_ask)}",
+        _btc_vs_target(b),
+        "",
+        "<b>🧠 Bot's view</b>",
+    ]
+    if b.p_yes is None:
+        lines.append("Not enough data to estimate the odds yet.")
+    else:
+        lines.append(f"Chance YES wins: <b>{_pct(b.p_yes)}</b> (range {_pct(b.p_yes_low)}–{_pct(b.p_yes_high)})")
+        if e:
+            lines.append(f"Best buy: {e.side.upper()} at {_c(e.ask)} · profit after fees ≈ {e.ev_low_cents:+.0f}¢/contract")
+        lines.append(f"Signal strength: {_bar(b.strength / 100)} {b.strength}")
     lines += [
-        f"MOMENTUM: {mom}",
-        f"TREND: {_label(f.trend_strength, 'Up', 'Down', 'Flat', 0.3)}",
-        f"VOLATILITY: {vol}",
-        f"VOLUME: {volume}",
-        f"KALSHI PRICE: YES mid {_c(snap.yes_mid)}" + (f" ({km:+.0f}¢ / 5m)" if km is not None else ""),
-        f"MODEL PROBABILITY: {model}",
-        f"ESTIMATED NET EDGE: {f'{e.side.upper()} {e.ev_cents:+.1f}¢ point / {e.ev_low_cents:+.1f}¢ conservative' if e else NA}",
-        f"SIGNAL STRENGTH: {b.strength}/100",
-        f"REGIME: {b.regime.badge}",
-        f"RISK: {rt.state.risk_level.badge}",
-        "", "DECISION:", "✅ TRADE" if approved else "⚪ NO TRADE", "", "Reasons:",
+        "",
+        "<b>📈 What BTC is doing</b>",
+        f"Last 5 min: {_moving(f)}",
+        f"Trend {trend} · moves {vol} · trading {volume}",
+        f"Mood: {b.regime.badge.split(' ', 1)[1].title()}",
+        "",
     ]
     if approved:
-        lines += [f"+ {escape(s)}" for s in b.supporting[:4]] or ["+ all checks passed"]
-        lines += [f"⚠️ {escape(w)}" for w in (d.warnings if d else ())][:3]
+        lines.append(f"✅ <b>TRADE FOUND - BUY {e.side.upper()}</b>")
+        lines.append(f"• Bot's odds {_pct(e.p_point)} vs price {_c(e.ask)} - a bargain after fees")
+        if f.spot is not None and b.terms.threshold is not None:
+            lines.append(f"• {_btc_vs_target(b).split(' · ', 1)[-1].capitalize()} with "
+                         f"{int(snap.time_remaining() // 60)} min left")
+        lines += [f"⚠️ {escape(w)}" for w in (d.warnings if d else ())][:2]
     else:
-        reasons = list(dict.fromkeys((d.failures if d else ()) or [r.text for r in b.rejections if r.critical]))
-        lines += [f"• {escape(r)}" for r in reasons[:5]]
-    lines += ["", SCORE_NOTE]
-    buttons: list[Button] = []
-    if approved and d is not None:
-        buttons.append(("⚠️ Live Trade" if rt.state.mode == "live" else "💰 Paper Trade", f"buy:{v.info.ticker}"))
-    buttons += [("🧠 Why?", f"bwhy:{v.info.ticker}"), ("📋 Checklist", f"chk:{v.info.ticker}"),
-                ("❌ Pass", "home"), ("🔙 Back", "home")]
-    return Screen("\n".join(lines), grid(buttons), route="btc", refreshable=True)
+        lines.append("⚪ <b>NO TRADE</b>")
+        lines += [f"• {escape(r)}" for r in reasons(b, d)]
+    if not b.calibration.calibrated:
+        lines += ["", "<i>The bot's odds are estimates until proven on enough finished markets.</i>"]
+    buttons: list[list[Button]] = []
+    if approved and e is not None:
+        label = "💵 Buy with real money" if rt.state.mode == "live" else "📝 Paper trade"
+        buttons.append([(f"{label}: {e.side.upper()} {_c(e.ask)}", f"buy:{v.info.ticker}")])
+    buttons += [[("🧠 Full details", f"bwhy:{v.info.ticker}"), ("📋 Checklist", f"chk:{v.info.ticker}")], *nav]
+    return Screen("\n".join(lines), buttons, route="btc", refreshable=True)
 
 
 def why(rt: BotRuntime, ticker: str) -> Screen:
     v = rt.view(ticker)
-    back = [[("🔙 Back", "btc")]]
+    back = [[("🔙 Signal", "btc"), HOME]]
     if v is None or v.signal is None or v.signal.btc is None:
         return Screen("No BTC analysis for this market yet.", back, route=f"bwhy:{ticker}")
     b, d = v.signal.btc, v.decision
-    approved = bool(d and d.approved)
-    lines = ["🧠 <b>WHY THIS TRADE?</b>" if approved else "🧠 <b>WHY NO TRADE?</b>", "",
-             f"Contract: {escape(b.terms.yes_means)}",
-             f"Settlement source: {escape(b.terms.settlement_source)}", ""]
+    f = b.features
+    lines = ["🧠 <b>FULL DETAILS</b>", "",
+             "<b>The contract</b>", f"YES = {escape(b.terms.yes_means)}", f"NO = {escape(b.terms.no_means)}",
+             f"<code>{escape(ticker)}</code>", ""]
     if b.edges:
-        lines.append("<b>Executable prices vs model</b>")
+        lines.append("<b>Price vs the bot's odds</b> (per contract)")
         for e in b.edges:
-            lines.append(f"{e.side.upper()}: ask {_c(e.ask)} + costs {e.cost_cents - e.ask:.1f}¢ · P(win) "
-                         f"{_pct(e.p_point)} (low {_pct(e.p_low)}) → EV {e.ev_cents:+.1f}¢ / {e.ev_low_cents:+.1f}¢")
+            lines.append(f"{e.side.upper()}: pay {_c(e.ask)} + {e.cost_cents - e.ask:.1f}¢ fees/slippage · "
+                         f"wins {_pct(e.p_point)} (cautious {_pct(e.p_low)}) → {e.ev_low_cents:+.1f}¢")
         lines.append("")
+    lines += ["<b>BTC numbers</b>",
+              f"Distance to target: {f.dist_bps:+.0f} bps ({f.dist_sigma:+.2f}σ)" if f.dist_bps is not None
+              and f.dist_sigma is not None else "Distance to target: —",
+              f"Momentum 5m: {f.mom_z_5m:+.1f}σ · 15m: {f.mom_z_15m:+.1f}σ" if f.mom_z_5m is not None
+              and f.mom_z_15m is not None else "Momentum: —",
+              f"Volatility: {f.sigma_1m * 1e4:.1f} bps/min" if f.sigma_1m else "Volatility: —", ""]
     if b.supporting:
-        lines += ["<b>Supporting</b>", *[f"✓ {escape(s)}" for s in b.supporting], ""]
+        lines += ["<b>For</b>", *[f"✓ {escape(s)}" for s in b.supporting], ""]
     if b.conflicting:
-        lines += ["<b>Conflicting</b>", *[f"✗ {escape(s)}" for s in b.conflicting], ""]
-    if b.rejections:
-        lines.append("<b>No-trade checks</b>")
-        for r in b.rejections:
-            lines.append(f"{'⛔' if r.critical else '⚠️'} {escape(r.text)}")
-        lines.append("")
-    if d is not None and not d.approved:
-        extra = [x for x in d.failures if x not in {r.text for r in b.rejections}]
-        if extra:
-            lines += ["<b>Account / risk limits</b>", *[f"⛔ {escape(x)}" for x in extra[:5]], ""]
-    lines += [f"Calibration: {escape(b.calibration.label)}",
+        lines += ["<b>Against</b>", *[f"✗ {escape(s)}" for s in b.conflicting], ""]
+    checks = list(dict.fromkeys(list(d.failures) if d else [r.text for r in b.rejections if r.critical]))
+    if checks:
+        lines += ["<b>Why not</b>", *[f"⛔ {escape(friendly(x, b))} <i>({escape(x)})</i>" for x in checks[:6]], ""]
+    lines += [f"Odds accuracy: {escape(_accuracy_short(b.calibration))}",
               f"Data age: Kalshi {_age(b.data_age_sec.get('kalshi'))} · BTC {_age(b.data_age_sec.get('btc'))}",
-              "", SCORE_NOTE]
+              "<i>Signal strength is an evidence score, not a win chance.</i>"]
     return Screen("\n".join(lines)[:3900], back, route=f"bwhy:{ticker}", refreshable=True)
 
 
@@ -233,7 +363,15 @@ def _age(v: float | None) -> str:
     return NA if v is None else f"{v:.0f}s"
 
 
-# ------------------------------------------------------------------ analytics
+def _accuracy_short(cal: Any) -> str:
+    if cal.status == "CALIBRATED":
+        return f"✅ proven on {cal.n_markets} markets"
+    if cal.status == "NOT_CALIBRATED":
+        return f"⚠️ not accurate enough yet ({cal.n_markets} markets)"
+    return f"⏳ still learning ({cal.n_markets} markets so far)"
+
+
+# ------------------------------------------------------------------ results
 def perf_metrics(positions: list[Position]) -> dict[str, Any]:
     ps = sorted(positions, key=lambda p: p.closed_at or p.opened_at)
     pnls = [p.realized_pnl or 0.0 for p in ps]
@@ -253,104 +391,192 @@ def perf_metrics(positions: list[Position]) -> dict[str, Any]:
             "pf": (gw / gl) if gl > 0 else (math.inf if gw > 0 else None), "max_dd": dd, "streak": worst}
 
 
-def _perf_lines(title: str, m: dict[str, Any]) -> list[str]:
-    if not m["trades"]:
-        return [f"<b>{title}</b>", "No closed trades yet."]
-    pf = "∞" if m["pf"] == math.inf else (NA if m["pf"] is None else f"{m['pf']:.2f}")
-    out = [f"<b>{title}</b>",
-           f"Trades {m['trades']} · W {m['wins']} / L {m['losses']} · WR {_pct(m['win_rate'])}",
-           f"Gross {_usd(m['gross'])} · Fees {_usd(m['fees'], False)} · Net {_usd(m['net'])}",
-           f"Avg/trade {_usd(m['avg'])} · PF {pf} · Max DD {_usd(m['max_dd'], False)} · Worst streak {m['streak']}"]
-    if m["trades"] < 30:
-        out.append(f"⚠️ Only {m['trades']} trades - too few to judge.")
+def _perf_block(title: str, all_time: dict[str, Any], today: dict[str, Any]) -> list[str]:
+    out = [f"<b>{title}</b>"]
+    if not all_time["trades"]:
+        return out + ["No finished trades yet."]
+    out.append(f"Today: {_n(today['trades'], 'trade')} · {_usd(today['net'])}" if today["trades"]
+               else "Today: no trades")
+    out.append(f"All time: {_n(all_time['trades'], 'trade')} · {_pct(all_time['win_rate'])} won · "
+               f"<b>{_usd(all_time['net'])}</b>")
+    out.append(f"Per trade {_usd(all_time['avg'])} · fees {_usd(all_time['fees'], False)} · "
+               f"worst dip {_usd(all_time['max_dd'], False)}")
+    if all_time["trades"] < 30:
+        out.append(f"{_bar(all_time['trades'] / 30)} {all_time['trades']}/30 trades before results mean much")
     return out
 
 
 def analytics(rt: BotRuntime) -> Screen:
-    paper = perf_metrics(rt.repo.closed_positions(mode="paper", limit=100_000))
-    live = perf_metrics(rt.repo.closed_positions(mode="live", limit=100_000))
+    start = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    blocks = []
+    for mode, title in (("paper", "📝 Paper trading"), ("live", "💵 Real money")):
+        blocks += _perf_block(title, perf_metrics(rt.repo.closed_positions(mode=mode, limit=100_000)),
+                              perf_metrics(rt.repo.closed_positions(mode=mode, since=start, limit=100_000)))
+        blocks.append("")
     cal = rt.calibration
-    lines = ["📈 <b>BTC ANALYTICS</b>", "", "<i>Backtest, paper and live are never combined.</i>", "",
-             *_perf_lines("📝 PAPER (simulated)", paper), "", *_perf_lines("⚠️ LIVE (real money)", live), ""]
-    lines += ["<b>🎯 Model calibration</b>", escape(cal.state.label) if cal else "⚠️ MODEL NOT YET CALIBRATED"]
-    if cal and cal.state.brier_model is not None:
-        mk = f"{cal.state.brier_market:.4f}" if cal.state.brier_market is not None else NA
-        lines.append(f"Brier model {cal.state.brier_model:.4f} vs Kalshi {mk} (lower = better)")
+    lines = ["📈 <b>RESULTS</b>", "", *blocks, "<b>🎯 Are the bot's odds accurate?</b>"]
+    lines += _accuracy_lines(rt, cal.state if cal else None)
     rep = load_report(Path(rt.settings.btc_backtest_report))
-    lines += ["", "<b>🧪 BACKTEST (last saved)</b>"]
-    if rep:
-        fs = rep["variants"]["full strategy"]["oos"]
-        lines += [f"{rep['data']['first_day']} .. {rep['data']['last_day']} · OOS trades {fs['trades']} · "
-                  f"net {_usd(fs['net_pnl'])} (1 contract)", escape(rep["verdict"])]
-    else:
-        lines.append("No backtest yet (run scripts/btc_backtest.py).")
-    buttons = [("🎯 Calibration", "bcal"), ("🧪 Backtest", "bt"), ("📜 History", "hist:all"),
-               ("🔬 Research", "anl"), BACK]
-    return Screen("\n".join(lines), grid(buttons), route="banl")
+    lines += ["", "<b>🧪 Backtest</b>", _backtest_one_liner(rep)]
+    buttons = grid2([("🎯 Odds accuracy", "bcal"), ("🧪 Backtest", "bt"), ("📜 History", "hist:all"),
+                     ("🔬 Research", "anl")]) + [[HOME]]
+    return Screen("\n".join(lines), buttons, route="banl")
+
+
+def _accuracy_lines(rt: BotRuntime, state: Any) -> list[str]:
+    need = rt.settings.hist_min_samples
+    if state is None or state.status == "INSUFFICIENT":
+        n = state.n_markets if state else 0
+        return [f"⏳ Still learning {_bar(n / need)} {n}/{need} markets"]
+    if state.status == "CALIBRATED":
+        return [f"✅ Yes - checked on {state.n_markets} finished markets"]
+    return [f"⚠️ Not yet - off by {(state.ece or 0) * 100:.0f} pts on {state.n_markets} markets",
+            "Trading stays blocked on Low/Medium until this improves."]
+
+
+def _backtest_one_liner(rep: dict[str, Any] | None) -> str:
+    if not rep:
+        return "Not run yet - tap 🧪 Backtest to see how."
+    fs = rep["variants"]["full strategy"]["oos"]
+    if not fs["trades"]:
+        return f"{rep['data']['first_day']}–{rep['data']['last_day']}: found no edge (0 test trades)"
+    return (f"{rep['data']['first_day']}–{rep['data']['last_day']}: {fs['trades']} test trades · "
+            f"{_pct(fs['win_rate'])} won · {(fs['avg_profit_per_trade'] or 0) * 100:+.1f}¢ per contract")
 
 
 def calibration(rt: BotRuntime) -> Screen:
     rt.refresh_model()
     cal = rt.calibration
-    lines = ["🎯 <b>MODEL CALIBRATION</b>", "", "Settled BTC markets, each market counted once.", ""]
-    if cal is None:
-        lines.append("⚠️ MODEL NOT YET CALIBRATED")
-    else:
-        lines += [escape(cal.state.label), f"Markets: {cal.markets} · predictions: {cal.minutes}", "",
-                  "<code>Estimated  Markets  Actual</code>"]
+    lines = ["🎯 <b>ARE THE BOT'S ODDS ACCURATE?</b>", "",
+             "When the bot says something has a 70% chance, it should happen about 7 times in 10.", ""]
+    lines += _accuracy_lines(rt, cal.state if cal else None)
+    if cal and cal.markets:
+        lines += ["", "<code>Bot said   Happened  Markets</code>"]
         for bk in cal.buckets:
-            act = _pct(bk.actual) if bk.actual is not None else "—"
-            pred = _pct(bk.predicted) if bk.predicted is not None else "—"
-            lines.append(f"<code>{bk.label:>8}  {bk.markets:>7}  {act:>6}</code>  (avg est {pred})")
-        if cal.state.ece is not None:
-            lines.append(f"\nCalibration error (ECE): {cal.state.ece * 100:.1f} pts "
-                         f"(limit {rt.settings.calibration_ece_tol * 100:.0f})")
-        if cal.state.status != "CALIBRATED":
-            lines.append(f"\n⚠️ Not trusted yet: needs {rt.settings.hist_min_samples}+ markets, small error "
-                         "and accuracy at least equal to Kalshi's own prices.")
-    return Screen("\n".join(lines), [[("🔙 Back", "banl")]], route="bcal")
+            if bk.markets:
+                lines.append(f"<code>{bk.label:>8}   {_pct(bk.actual):>8}  {bk.markets:>7}</code>")
+        if cal.state.brier_model is not None and cal.state.brier_market is not None:
+            better = cal.state.brier_model <= cal.state.brier_market
+            lines.append(f"\nCompared with Kalshi's own prices: {'✅ more accurate' if better else '⚠️ less accurate'}")
+    return Screen("\n".join(lines), [[("🔙 Results", "banl"), HOME]], route="bcal")
 
 
 def backtest(rt: BotRuntime) -> Screen:
-    from app.research.btc_backtest import format_report
-
     rep = load_report(Path(rt.settings.btc_backtest_report))
+    nav = [[("🔙 Results", "banl"), HOME]]
     if not rep:
-        text = ("🧪 <b>BACKTEST</b>\n\nNo backtest report yet. On the bot's computer run:\n"
-                "<code>python scripts/replay.py --days 30</code>\n<code>python scripts/btc_backtest.py</code>\n\n"
-                "It replays settled Kalshi BTC markets through this exact engine using only data available "
-                "at each minute, chooses settings on earlier days and tests them on later days.")
-        return Screen(text, [[("🔙 Back", "banl")]], route="bt")
-    body = escape(format_report(rep, full=False))
-    text = f"🧪 <b>BACKTEST</b> · {escape(rep.get('generated', ''))}\n\n<code>{body}</code>"
-    return Screen(text[:3900], [[("🔙 Back", "banl")]], route="bt")
+        text = ("🧪 <b>BACKTEST</b>\n\nA backtest replays past BTC markets to check whether the strategy "
+                "would have made money after fees, using only what was known at the time.\n\n"
+                "Not run yet. In the Linux terminal:\n"
+                "<code>cd ~/jga.pick</code>\n"
+                "<code>sudo docker compose run --rm bot python scripts/replay.py --days 30</code>\n"
+                "<code>sudo docker compose run --rm bot python scripts/btc_backtest.py</code>")
+        return Screen(text, nav, route="bt")
+    d = rep["data"]
+    fs = rep["variants"]["full strategy"]["oos"]
+    lines = ["🧪 <b>BACKTEST</b>", f"<i>Past data, not live results · {escape(rep.get('generated', '')[:10])}</i>", "",
+             f"Tested on {len(d['test_days'])} unseen days ({d['first_day']} – {d['last_day']}), "
+             f"{d['markets']} markets", ""]
+    if fs["trades"]:
+        pf = fs["profit_factor"]
+        lines += ["<b>Full strategy</b>", f"Trades: {fs['trades']} · won {_pct(fs['win_rate'])}",
+                  f"Profit: {_usd(fs['net_pnl'])} ({(fs['avg_profit_per_trade'] or 0) * 100:+.1f}¢ per contract)",
+                  f"Worst dip: {_usd(fs['max_drawdown'], False)} · win/loss ratio "
+                  f"{'∞' if pf == math.inf else f'{pf:.2f}' if pf else NA}", ""]
+    else:
+        lines += ["<b>Full strategy</b>", "Made no test trades - no edge found on earlier days.", ""]
+    lines.append("<b>Which parts helped</b> (✅ helped · ❌ hurt · ➖ no clear difference)")
+    for c in rep.get("component_tests", []):
+        icon = {"improves": "✅", "hurts": "❌", "insufficient": "❔"}.get(c["verdict"].split()[0], "➖")
+        lines.append(f"{icon} {escape(COMPONENTS.get(c['component'], c['component']))}")
+    lines += ["", "<b>Verdict</b>", escape(plain_verdict(rep["verdict"]))]
+    return Screen("\n".join(lines)[:3900], nav, route="bt")
+
+
+VERDICTS = (
+    ("POSITIVE out of sample", "✅ Made money on days it had never seen. Next step: paper-trade it for a few weeks."),
+    ("POSITIVE ON AVERAGE", "🟡 Slightly profitable, but it could be luck. Keep paper trading - no real money yet."),
+    ("NO EVIDENCE", "❌ It never found a profitable setting. Don't use real money."),
+    ("NO EDGE", "❌ Not profitable after fees. Don't use real money."),
+    ("INSUFFICIENT", "⚠️ Not enough history to judge. Download more days and run it again."),
+)
+COMPONENTS = {
+    "momentum vs baseline": "Following BTC's recent move",
+    "trend filter": "Trend filter",
+    "volatility filter": "Skipping choppy markets",
+    "Kalshi price filter": "Price limits",
+    "probability model on momentum": "Odds check on momentum trades",
+    "probability model + net edge vs momentum": "Odds model + profit-after-fees check",
+    "no-trade filters on the model": "All the no-trade safety checks",
+    "late-entry filter": "Too-late-to-enter check",
+    "regime filter": "Market-mood filter",
+    "strength filter": "Signal-strength filter",
+}
+
+
+def plain_verdict(text: str) -> str:
+    return next((nice for key, nice in VERDICTS if text.startswith(key)), text)
+
+
+# ------------------------------------------------------------------ settings / info
+def settings(rt: BotRuntime, note: str = "") -> Screen:
+    st, p = rt.state, rt.profile()
+    lines = ["⚙️ <b>SETTINGS</b>", "",
+             f"Risk level: {st.risk_level.emoji} {st.risk_level.value.title()}",
+             f"Mode: {_mode(rt)}" + (" (practice money)" if st.mode == "paper" else ""),
+             f"Auto trade: {'🟢 On' if st.auto_trade else '⚪ Off'}", "",
+             f"Max per trade: ${p.max_position_usd:g}",
+             f"Daily loss limit: ${p.max_daily_loss_usd:g}",
+             f"Min profit per contract: {p.min_ev_cents:g}¢ after fees"]
+    if note:
+        lines += ["", escape(note)]
+    buttons = grid2([("🛡 Risk level", "risk"), ("🤖 Auto trade", "auto"), ("📝 Paper / Real", "mode"),
+                     ("🧠 How it works", "strat"), ("📊 Connections", "status"), ("🧹 Tidy chat", "clear")]) + [[HOME]]
+    return Screen("\n".join(lines), buttons, route="cfg")
 
 
 def strategy(rt: BotRuntime) -> Screen:
     p = rt.profile()
-    s = rt.settings
+    lvl = rt.state.risk_level
     lines = [
-        "🧠 <b>BTC STRATEGY</b>", "",
-        "Markets: Kalshi Bitcoin 15-minute contracts only (verified rules)",
-        f"BTC data: Coinbase BTC-USD (proxy for BRTI, ±{s.btc_basis_bps:g} bps basis)", "",
-        "<b>Probability model</b>",
-        "P(YES) = Φ(ln(BTC / threshold) / (σ·√T))",
-        f"σ = last {s.btc_sigma_window_min} min realised volatility; T adjusted for the settlement average.",
-        "Range from volatility error + basis; trades use the conservative end.", "",
-        "<b>Trade only if</b>",
-        f"• Net edge after fees + slippage ≥ {p.min_ev_cents:+g}¢ (conservative)",
-        f"• Signal strength ≥ {p.min_btc_strength} · uncertainty ≤ {p.max_prob_width * 100:.0f} pts",
-        f"• Spread ≤ {p.max_spread_cents:g}¢ · ≥ {p.min_time_remaining_sec}s left · entry "
-        f"{p.min_entry_price_cents:g}-{p.max_entry_price_cents:g}¢",
-        f"• Regime not in: {escape(', '.join(sorted(p.regimes_blocked)) or 'none')}",
-        "• No BTC/Kalshi conflict, move not already priced in, data fresh",
-        "• Model calibrated" + (" (required)" if p.require_known_ev else " (paper may trade while collecting)"), "",
-        f"<b>Sizing</b>: ≤ ${p.max_position_usd:g}/trade, Kelly × {p.kelly_fraction:g} on the conservative P, "
-        f"daily loss ${p.max_daily_loss_usd:g}, pause after {p.max_consecutive_losses} losses",
-        "", "Live orders always need manual confirmation.",
+        "🧠 <b>HOW THE BOT DECIDES</b>", "",
+        "1. Reads the market's rules (what YES means)",
+        "2. Watches BTC's live price",
+        "3. Estimates the chance YES wins",
+        "4. Compares that chance with the Kalshi price",
+        "5. Trades only if the price is a bargain after fees and nothing looks risky", "",
+        f"<b>At {lvl.emoji} {lvl.value.title()} risk it needs</b>",
+        f"• At least {p.min_ev_cents:g}¢ profit per contract after fees",
+        f"• Signal strength {p.min_btc_strength}+ and a confident estimate",
+        f"• {p.min_time_remaining_sec // 60}+ min left, prices {p.min_entry_price_cents:g}–{p.max_entry_price_cents:g}¢",
+        "• Odds proven accurate" if p.require_known_ev else "• Paper trades allowed while the odds are still being checked",
+        "", "<b>Safety</b>",
+        f"• Max ${p.max_position_usd:g} per trade, ${p.max_daily_loss_usd:g} loss per day",
+        f"• Pauses after {p.max_consecutive_losses} losses in a row",
+        "• Real-money orders always need your tap to confirm",
     ]
-    return Screen("\n".join(lines), [[("📈 Analytics", "banl"), ("🧪 Backtest", "bt")], [("⚙️ Settings", "cfg"), BACK]],
+    return Screen("\n".join(lines), [[("📈 Results", "banl"), ("🧪 Backtest", "bt")], [("🔙 Settings", "cfg"), HOME]],
                   route="strat")
+
+
+def status(rt: BotRuntime) -> Screen:
+    st, h = rt.state, rt.health()
+    kalshi, btc_feed = _feeds(rt)
+    feed = h.get("btc_feed")
+    feed_txt = {"🟢": "connected", "🟡": "delayed", "🔴": "disconnected", "🧪": "test data", "⚪": "idle"}
+    lines = ["📊 <b>CONNECTIONS</b>", "",
+             f"Bot: {_state_line(rt)}",
+             "Telegram: 🟢 connected",
+             f"Kalshi: {kalshi} {feed_txt[kalshi]}" + (" - check your API key" if h["auth_failed"] else ""),
+             f"BTC price: {btc_feed} {feed_txt[btc_feed]}"
+             + (f" ({feed.age_sec:.0f}s ago)" if feed is not None and feed.age_sec is not None else ""),
+             "", f"{_mode(rt)} · {st.risk_level.emoji} {st.risk_level.value.title()} risk · "
+                 f"Auto {'on' if st.auto_trade else 'off'}",
+             f"Open trades: {len(rt.portfolio.open_positions(st.mode))}"]
+    if h["last_error"]:
+        lines += ["", f"⚠️ <i>{escape(str(h['last_error'])[:150])}</i>"]
+    return Screen("\n".join(lines), [[("🔄 Refresh", "status"), ("🔙 Settings", "cfg")], [HOME]], route="status",
+                  refreshable=True)
 
 
 def status_lines(rt: BotRuntime) -> list[str]:
@@ -358,8 +584,36 @@ def status_lines(rt: BotRuntime) -> list[str]:
     if feed is None:
         return []
     age = f" · {feed.age_sec:.0f}s old" if feed.age_sec is not None else ""
-    err = f" · {escape(feed.error)}" if feed.error and not feed.ok else ""
-    return [f"BTC Feed: {feed.badge} ({escape(feed.source)}{age}){err}"]
+    return [f"BTC Feed: {feed.badge} ({escape(feed.source)}{age})"]
 
 
-__all__ = ["home", "signal", "why", "analytics", "calibration", "backtest", "strategy", "status_lines", "APP_NAME"]
+# ------------------------------------------------------------------ trades
+def trades(rt: BotRuntime, page: int = 0, per_page: int = 8) -> Screen:
+    mode = rt.state.mode
+    rows = rt.repo.closed_positions(mode=mode, limit=per_page, offset=page * per_page)
+    total = rt.repo.count_closed(mode)
+    opens = rt.portfolio.open_positions(mode)
+    lines = [f"💰 <b>TRADES</b> · {_mode(rt)}", ""]
+    if opens:
+        lines.append(f"<b>Open now ({len(opens)})</b>")
+        for p in opens:
+            lines.append(f"⏳ {p.side.upper()} x{p.contracts} @ {_c(p.entry_price)} · closes {_clock(p.close_time)}"
+                         if p.close_time else f"⏳ {p.side.upper()} x{p.contracts} @ {_c(p.entry_price)}")
+        lines.append("")
+    lines.append("<b>Finished</b>" if rows else "No finished trades yet.")
+    for p in rows:
+        when = _clock(p.closed_at) if p.closed_at else ""
+        lines.append(f"{'✅' if p.won else '❌'} {p.side.upper()} x{p.contracts} @ {_c(p.entry_price)} → "
+                     f"{_c(p.exit_price)} · <b>{_usd(p.realized_pnl)}</b> · {when}")
+    nav: list[Button] = []
+    if page > 0:
+        nav.append(("◀️ Newer", f"trades:{page - 1}"))
+    if (page + 1) * per_page < total:
+        nav.append(("Older ▶️", f"trades:{page + 1}"))
+    buttons = [nav] if nav else []
+    buttons += [[("📂 Manage open", "pos"), ("📜 History", "hist:all")], [HOME]]
+    return Screen("\n".join(lines), buttons, route=f"trades:{page}")
+
+
+__all__ = ["home", "signal", "why", "analytics", "calibration", "backtest", "settings", "strategy", "status",
+           "status_lines", "trades", "perf_metrics"]
