@@ -1,4 +1,4 @@
-# 📡 JGAPicksBot — Kalshi 15-Minute Directional Trading Bot
+# 📡 JGA Picks (@JGAPicksBot) — Kalshi Bitcoin 15-Minute Bot
 
 > **Default engine: Bitcoin only (`STRATEGY_MODE=btc`).** The bot prices each Kalshi BTC 15-minute contract
 > with a volatility model, compares that probability with the executable ask after fees and slippage,

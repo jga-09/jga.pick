@@ -6,8 +6,10 @@ import asyncio
 import logging
 
 from telegram import BotCommand
+from telegram.error import TelegramError
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
+from app import DESCRIPTION, DISPLAY_NAME, SHORT_DESCRIPTION
 from app.runtime import BotRuntime
 from app.telegram.callbacks import CallbackRouter
 from app.telegram.dashboard import AlertManager, DashboardManager
@@ -25,6 +27,20 @@ COMMANDS = [
 ]
 
 
+async def _set_profile(app: Application) -> None:
+    """Show the bot as "JGA Picks" in Telegram. Only changes what differs (Telegram rate-limits renames)."""
+    bot = app.bot
+    try:
+        if (await bot.get_my_name()).name != DISPLAY_NAME:
+            await bot.set_my_name(DISPLAY_NAME)
+        if (await bot.get_my_short_description()).short_description != SHORT_DESCRIPTION:
+            await bot.set_my_short_description(SHORT_DESCRIPTION)
+        if (await bot.get_my_description()).description != DESCRIPTION:
+            await bot.set_my_description(DESCRIPTION)
+    except TelegramError as e:  # cosmetic only; never block startup
+        log.warning("BOT_PROFILE not updated: %s", e)
+
+
 def build_application(rt: BotRuntime, token: str) -> Application:
     admin_ids = rt.settings.admin_ids
     router = CallbackRouter(rt, admin_ids)
@@ -40,6 +56,7 @@ def build_application(rt: BotRuntime, token: str) -> Application:
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.text))
         app.add_error_handler(handlers.error)
         await app.bot.set_my_commands([BotCommand(c, d) for c, d in COMMANDS])
+        await _set_profile(app)
         tasks.append(asyncio.create_task(dashboard.refresh_loop(), name="dashboard-refresh"))
         log.info("TELEGRAM_READY admins=%d", len(admin_ids))
         ok, why = rt.should_auto_start()

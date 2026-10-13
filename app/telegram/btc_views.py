@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
+from app import DISPLAY_NAME
 from app.research.btc_backtest import load_report
 from app.strategy.btc_decision import NoTrade
 from app.telegram.keyboards import Button, Screen
@@ -215,7 +216,7 @@ def home(rt: BotRuntime) -> Screen:
     d = v.decision if v else None
     kalshi, btc_feed = _feeds(rt)
     lines = [
-        f"📡 <b>BTC Bot</b> · {_state_line(rt)}",
+        f"📡 <b>{DISPLAY_NAME}</b> · ₿ BTC · {_state_line(rt)}",
         f"{_mode(rt)} · {st.risk_level.emoji} {st.risk_level.value.title()} risk · "
         f"🤖 Auto {'on' if st.auto_trade else 'off'}",
         f"Kalshi {kalshi}   BTC price {btc_feed}",

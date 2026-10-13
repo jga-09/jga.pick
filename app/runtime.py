@@ -36,7 +36,7 @@ from app.research.tradeanalysis import analyze_trade, describe, entry_snapshot, 
 from app.strategy.config import StrategyConfig
 from app.strategy.engine import SignalEngine
 from app.telegram import messages
-from app.strategy.signals import Direction, SignalResult
+from app.strategy.signals import SignalResult
 from app.trading.executor import TradeExecutor
 from app.trading.live import LiveExecutor
 from app.trading.paper import PaperExecutor

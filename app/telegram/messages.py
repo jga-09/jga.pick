@@ -5,7 +5,7 @@ from __future__ import annotations
 from html import escape
 from typing import TYPE_CHECKING, Any
 
-from app import APP_NAME
+from app import DISPLAY_NAME as APP_NAME
 from app.kalshi.market_data import ASSET_ICONS, MarketSnapshot
 from app.risk.profiles import RiskLevel, RiskProfile
 from app.strategy.signals import Direction, SignalResult, Validity
