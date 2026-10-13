@@ -186,6 +186,22 @@ class BotRuntime:
         log.info("KALSHI_KEY_SET key=%s... verified=%s", key_id[:4], balance is not None)
         return balance
 
+    async def kalshi_account(self) -> dict[str, Any]:
+        """Real Kalshi balance/positions for the account screen. Never raises; never returns key material."""
+        out: dict[str, Any] = {"source": self.kalshi_key_source(), "balance": None, "positions": None, "error": None}
+        if out["source"] == "none":
+            return out
+        try:
+            raw = await asyncio.wait_for(self.client.get_balance(), 8)
+            out["balance"] = None if raw.get("balance") is None else float(raw["balance"]) / 100
+            pos = await asyncio.wait_for(self.client.get_positions(), 8)
+            out["positions"] = sum(1 for p in pos.get("market_positions", []) if p.get("position"))
+        except KalshiAuthError:
+            out["error"] = "Kalshi rejected the key"
+        except (KalshiError, asyncio.TimeoutError):
+            out["error"] = "couldn't reach Kalshi right now"
+        return out
+
     def clear_kalshi_key(self) -> bool:
         removed = self.key_store.clear()
         if self.kalshi_key_source() == "telegram":

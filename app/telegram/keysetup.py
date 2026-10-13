@@ -17,7 +17,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from telegram import Message
+from telegram import Chat, Message
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 
@@ -84,6 +84,13 @@ class KeySetup:
         log.warning("SECRET_MESSAGE_SCRUBBED deleted=%s", deleted)
         return True
 
+    async def start(self, chat: Chat, uid: int) -> None:
+        if chat.type != "private":
+            await chat.send_message("🔒 For safety, connect your key in a private chat with the bot.")
+            return
+        self._flows[uid] = _Flow("id")
+        await chat.send_message(STEP1, parse_mode=ParseMode.HTML)
+
     # ----------------------------------------------------------- commands
     async def command(self, msg: Message, uid: int, cmd: str) -> None:
         if cmd == "cancel":
@@ -105,8 +112,7 @@ class KeySetup:
             await self._delete(msg)
             await self._consume_text(msg, uid, rest, _Flow("id"))
             return
-        self._flows[uid] = _Flow("id")
-        await self._reply(msg, STEP1)
+        await self.start(msg.chat, uid)
 
     # ----------------------------------------------------------- messages
     async def message(self, msg: Message, uid: int) -> bool:

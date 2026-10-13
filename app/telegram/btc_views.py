@@ -578,9 +578,47 @@ def settings(rt: BotRuntime, note: str = "") -> Screen:
               "none": "🔑 Kalshi key: ⚪ not connected · send /setkey"}[rt.kalshi_key_source()]]
     if note:
         lines += ["", escape(note)]
-    buttons = grid2([("🛡 Risk level", "risk"), ("🤖 Auto trade", "auto"), ("📝 Paper / Real", "mode"),
-                     ("🧠 How it works", "strat"), ("📊 Connections", "status"), ("🧹 Tidy chat", "clear")]) + [[HOME]]
+    buttons = grid2([("🔑 Kalshi account", "kacct"), ("🛡 Risk level", "risk"),
+                     ("🤖 Auto trade", "auto"), ("📝 Paper / Real", "mode"),
+                     ("🧠 How it works", "strat"), ("📊 Connections", "status")]) + [[("🧹 Tidy chat", "clear"), HOME]]
     return Screen("\n".join(lines), buttons, route="cfg")
+
+
+def account(rt: BotRuntime, info: dict[str, Any]) -> Screen:
+    """Kalshi account: connection, real balance, and what automatic trading needs."""
+    st, s = rt.state, rt.settings
+    src = info["source"]
+    lines = ["🔑 <b>KALSHI ACCOUNT</b>", ""]
+    if src == "none":
+        lines += ["Status: ⚪ Not connected", "",
+                  "Connect your Kalshi API key so the bot can read your real balance and positions,",
+                  "and later place orders for you. Your messages are deleted the moment you send them."]
+    else:
+        lines.append(f"Status: ✅ Connected ({'from .env' if src == 'env' else 'via Telegram'})")
+        if info["error"]:
+            lines.append(f"⚠️ {escape(info['error'])}")
+        else:
+            lines += [f"💵 Real balance: <b>{_usd(info['balance'], signed=False)}</b>",
+                      f"📂 Open Kalshi positions: {info['positions'] if info['positions'] is not None else NA}"]
+    live_ready = s.live_allowed and src != "none"
+    lines += [SEP, "🤖 <b>Automatic trading</b>",
+              f"📝 Paper: Auto trade {'🟢 ON' if st.auto_trade and st.mode == 'paper' else '⚪ OFF'} "
+              "(no key needed)",
+              "💵 Real money: " + ("🟢 allowed - every order asks you to confirm" if live_ready else "⚪ OFF")]
+    if not live_ready:
+        steps = []
+        if src == "none":
+            steps.append("1. Connect your key (button below)")
+        steps.append(f"{len(steps) + 1}. Build a paper record first (30+ trades, odds rated accurate)")
+        steps.append(f"{len(steps) + 1}. In .env set LIVE_TRADING=true and PAPER_TRADING=false, restart")
+        lines += ["", "<b>To use real money later:</b>", *steps]
+    lines += ["", "<i>The key is stored only on the bot's server and is never shown in chat. "
+                  "Real-money orders always need your confirmation.</i>"]
+    rows: list[list[Button]] = [[("🔁 Replace key" if src != "none" else "🔑 Connect key", "keyset")]]
+    if src == "telegram":
+        rows[0].append(("🗑 Remove key", "keydel"))
+    rows.append([("🔄 Refresh", "kacct"), ("🔙 Back", "cfg")])
+    return Screen("\n".join(lines), rows, route="kacct")
 
 
 def strategy(rt: BotRuntime) -> Screen:

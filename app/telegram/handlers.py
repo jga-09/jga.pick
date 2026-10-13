@@ -21,7 +21,7 @@ COMMAND_ROUTES = {
     "start": "home", "menu": "home", "status": "status", "markets": "signals", "signals": "signals",
     "risk": "risk", "config": "cfg", "positions": "pos", "trades": "trades:0", "pnl": "pnl",
     "history": "hist:today", "strategy": "strat", "pause": "pause", "resume": "resume", "stop": "stop",
-    "estop": "estop", "btc": "btc", "analytics": "banl", "backtest": "bt", "calibration": "bcal",
+    "estop": "estop", "account": "kacct", "btc": "btc", "analytics": "banl", "backtest": "bt", "calibration": "bcal",
 }
 
 
@@ -97,6 +97,9 @@ class Handlers:
         if msg is None or uid is None or not self.router.is_admin(uid):
             return
         chat_id = msg.chat.id
+        if resp.start_key_setup:
+            await self.keys.start(msg.chat, uid)
+            return
         if resp.clear:
             await self.dashboard.clear(chat_id)
         if resp.screen:

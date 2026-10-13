@@ -35,6 +35,7 @@ ACTIONS: dict[str, tuple[int, ...]] = {
     "why": (1,), "chk": (1,), "anl": (0,), "anld": (0,), "cal": (0,), "loss": (0,), "wins": (0,),
     "exp": (0,), "filt": (0,), "feat": (0,),
     "btc": (0,), "bwhy": (1,), "banl": (0,), "bcal": (0,), "bt": (0,),
+    "kacct": (0,), "keyset": (0,), "keydel": (0,),
     "clear": (0,), "estop": (0,), "estopok": (0,), "ereset": (0,), "eresetok": (0,), "pnl": (0,),
 }
 
@@ -45,6 +46,7 @@ class Response:
     toast: str | None = None
     clear: bool = False
     alert: bool = False  # show toast as a modal alert
+    start_key_setup: bool = False  # transport layer starts the /setkey flow
 
 
 def parse_callback(data: str | None) -> tuple[str, list[str]]:
@@ -195,6 +197,21 @@ class CallbackRouter:
 
     async def _on_ind(self, uid: int) -> Response:
         return Response(M.indicators(self.rt))
+
+    async def _on_kacct(self, uid: int) -> Response:
+        from app.telegram import btc_views
+
+        return Response(btc_views.account(self.rt, await self.rt.kalshi_account()))
+
+    async def _on_keyset(self, uid: int) -> Response:
+        return Response(None, toast="🔑 Follow the steps below", start_key_setup=True)
+
+    async def _on_keydel(self, uid: int) -> Response:
+        from app.telegram import btc_views
+
+        removed = self.rt.clear_kalshi_key()
+        return Response(btc_views.account(self.rt, await self.rt.kalshi_account()),
+                        toast="🗑 Key removed" if removed else "No saved key")
 
     async def _on_cfg(self, uid: int) -> Response:
         return Response(M.config(self.rt))

@@ -23,7 +23,7 @@ COMMANDS = [
     ("risk", "Risk profile"), ("config", "Configuration"), ("positions", "Open positions"),
     ("trades", "Recent trades"), ("pnl", "P&L"), ("history", "Performance history"), ("strategy", "Strategy"),
     ("pause", "Pause trading"), ("resume", "Resume trading"), ("stop", "Stop bot"),
-    ("estop", "Emergency stop"), ("setkey", "Connect Kalshi API key (message auto-deleted)"),
+    ("estop", "Emergency stop"), ("account", "Kalshi account & balance"), ("setkey", "Connect Kalshi API key (message auto-deleted)"),
     ("removekey", "Remove saved Kalshi key"), ("health", "Health check"), ("help", "Help"),
 ]
 

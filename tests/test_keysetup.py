@@ -149,3 +149,17 @@ async def test_runtime_rejected_key_restores_old_signer(runtime, tmp_path):
     client.get_balance = AsyncMock(return_value={"balance": 1234})
     assert await runtime.set_kalshi_key(KEY_ID, _pem().encode()) == 12.34
     assert client.signer is not None and KeyStore(tmp_path / "k").exists()
+
+
+async def test_account_screen_and_buttons(runtime):
+    from app.telegram import btc_views
+    from app.telegram.callbacks import CallbackRouter
+    from tests.conftest import ADMIN_ID
+
+    router = CallbackRouter(runtime, {ADMIN_ID})
+    resp = await router.handle(ADMIN_ID, "kacct")
+    assert "Not connected" in resp.screen.text and "keyset" in str(resp.screen.buttons)
+    resp = await router.handle(ADMIN_ID, "keyset")
+    assert resp.start_key_setup
+    scr = btc_views.account(runtime, {"source": "telegram", "balance": 12.5, "positions": 1, "error": None})
+    assert "$12.50" in scr.text and "Remove key" in str(scr.buttons) and "confirm" in scr.text
