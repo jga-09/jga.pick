@@ -572,7 +572,10 @@ def settings(rt: BotRuntime, note: str = "") -> Screen:
              f"Auto trade: {'🟢 On' if st.auto_trade else '⚪ Off'}", "",
              f"Max per trade: ${p.max_position_usd:g}",
              f"Daily loss limit: ${p.max_daily_loss_usd:g}",
-             f"Min profit per contract: {p.min_ev_cents:g}¢ after fees"]
+             f"Min profit per contract: {p.min_ev_cents:g}¢ after fees", "",
+             {"env": "🔑 Kalshi key: ✅ connected (from .env)",
+              "telegram": "🔑 Kalshi key: ✅ connected · /removekey to remove",
+              "none": "🔑 Kalshi key: ⚪ not connected · send /setkey"}[rt.kalshi_key_source()]]
     if note:
         lines += ["", escape(note)]
     buttons = grid2([("🛡 Risk level", "risk"), ("🤖 Auto trade", "auto"), ("📝 Paper / Real", "mode"),

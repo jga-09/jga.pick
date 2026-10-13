@@ -94,6 +94,20 @@ cp .env.example .env
 2. BotFather replies with a token like `1234567890:AA…`. Put it in `.env` as `TELEGRAM_BOT_TOKEN`.
 3. Optionally run `/setprivacy` → *Enable* (the bot only needs commands and buttons).
 
+
+### Connect your Kalshi key from Telegram (`/setkey`)
+
+Paper trading needs no key. To connect one (to see your real balance, or before ever enabling live trading):
+
+1. In a **private chat** with the bot send `/setkey`.
+2. Send your **API Key ID**, then paste the **private key** (or send the `.pem` file).
+3. Each message is deleted the moment it arrives. The key is checked with Kalshi and only then saved to
+   the bot's data volume (`data/kalshi/`, owner-only permissions). It is never logged or shown again.
+4. `/removekey` deletes it. Connecting a key never turns on real-money trading.
+
+Telegram bot chats are not end-to-end encrypted, so the key passes through Telegram's servers until it is
+deleted. Use a key made just for this bot, and revoke it on kalshi.com if you think it was exposed.
+
 ## 9. Find your Telegram user id
 
 Message **@userinfobot** (or **@RawDataBot**). It replies with your numeric `Id`. Put it in

@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     kalshi_env: Literal["prod", "demo"] = "prod"
     kalshi_api_key_id: str | None = None
     kalshi_private_key_path: Path | None = None
+    # Where /setkey stores a key sent from Telegram (inside the data volume).
+    kalshi_key_dir: Path = Path("data/kalshi")
     kalshi_rest_url: str | None = None
     kalshi_ws_url: str | None = None
     kalshi_read_rps: float = Field(8.0, gt=0, le=50)
@@ -165,7 +167,16 @@ class Settings(BaseSettings):
 
     @property
     def has_kalshi_credentials(self) -> bool:
-        return bool(self.kalshi_api_key_id and self.kalshi_private_key_path)
+        return self.env_key_usable or self.stored_key_present
+
+    @property
+    def env_key_usable(self) -> bool:
+        return bool(self.kalshi_api_key_id and self.kalshi_private_key_path
+                    and Path(self.kalshi_private_key_path).is_file())
+
+    @property
+    def stored_key_present(self) -> bool:
+        return (self.kalshi_key_dir / "key_id").is_file() and (self.kalshi_key_dir / "private_key.pem").is_file()
 
     @property
     def live_allowed(self) -> bool:
@@ -192,11 +203,15 @@ class Settings(BaseSettings):
                 errors.append("TELEGRAM_ADMIN_IDS must list at least one numeric Telegram user id")
         if self.live_trading and self.paper_trading:
             warnings.append("LIVE_TRADING=true but PAPER_TRADING=true -> running in PAPER mode")
-        if self.live_allowed:
-            if not self.has_kalshi_credentials:
-                errors.append("Live trading requires KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PATH")
-            elif not Path(self.kalshi_private_key_path).is_file():  # type: ignore[arg-type]
-                errors.append("KALSHI_PRIVATE_KEY_PATH does not point to a readable file")
+        env_key_broken = bool(self.kalshi_private_key_path) and not self.env_key_usable
+        if self.live_allowed and not self.has_kalshi_credentials:
+            errors.append("Live trading requires a Kalshi API key: send /setkey to the bot, or set "
+                          "KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PATH")
+        elif env_key_broken:
+            warnings.append("KALSHI_PRIVATE_KEY_PATH is not a readable file inside the container (or "
+                            "KALSHI_API_KEY_ID is empty) - ignoring it"
+                            + ("; using the key saved with /setkey" if self.stored_key_present
+                               else "; using public market data (fine for paper trading)"))
         if self.data_source == "fixture" and self.live_allowed:
             errors.append("DATA_SOURCE=fixture can never be combined with live trading")
         if self.allow_live_autotrade and not self.live_allowed:

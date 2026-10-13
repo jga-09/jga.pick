@@ -13,6 +13,7 @@ from app.database.db import Database
 from app.database.repository import Repository
 from app.errors import ConfigError, KalshiAuthError
 from app.kalshi.auth import KalshiSigner
+from app.kalshi.keystore import KeyStore
 from app.kalshi.client import KalshiClient
 from app.kalshi.fixtures import FixtureKalshiClient
 from app.risk.profiles import load_profiles
@@ -27,8 +28,10 @@ def build_runtime(settings: Settings) -> BotRuntime:
         client = FixtureKalshiClient()
     else:
         signer = None
-        if settings.has_kalshi_credentials:
+        if settings.env_key_usable:
             signer = KalshiSigner.from_file(settings.kalshi_api_key_id or "", settings.kalshi_private_key_path or "")
+        elif settings.stored_key_present:
+            signer = KeyStore(settings.kalshi_key_dir).load()
         client = KalshiClient(settings, signer)
     repo = Repository(Database(settings.database_url))
     repo.init()

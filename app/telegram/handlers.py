@@ -11,6 +11,7 @@ from telegram.ext import ContextTypes
 from app.telegram import messages as M
 from app.telegram.callbacks import CallbackGuard, CallbackRouter
 from app.telegram.dashboard import DashboardManager
+from app.telegram.keysetup import KeySetup
 from app.utils.logging import log_event
 
 log = logging.getLogger(__name__)
@@ -24,11 +25,15 @@ COMMAND_ROUTES = {
 }
 
 
+KEY_COMMANDS = ("setkey", "removekey", "cancel")
+
+
 class Handlers:
     def __init__(self, router: CallbackRouter, dashboard: DashboardManager) -> None:
         self.router = router
         self.dashboard = dashboard
         self.guard = CallbackGuard()
+        self.keys = KeySetup(router.rt)
 
     async def command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         msg, user = update.effective_message, update.effective_user
@@ -36,11 +41,17 @@ class Handlers:
             return
         cmd = msg.text.split()[0].lstrip("/").split("@")[0].lower()
         uid = user.id if user else None
+        if await self.keys.scrub(msg) and cmd != "setkey":
+            await msg.chat.send_message("🫥 That looked like a private key, so I deleted it. Use /setkey.")
+            return
         if not self.router.is_admin(uid):
             log_event(log, "UNAUTHORIZED_COMMAND", logging.WARNING, user=uid, cmd=cmd[:20])
             await msg.reply_text(M.unauthorized().text)
             return
         assert uid is not None
+        if cmd in KEY_COMMANDS:
+            await self.keys.command(msg, uid, cmd)
+            return
         if cmd == "help":
             await msg.reply_text(M.help_text(), parse_mode=ParseMode.HTML)
             return
@@ -92,9 +103,20 @@ class Handlers:
             await self.dashboard.show(chat_id, uid, resp.screen, message_id=msg.message_id)
 
     async def text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        user = update.effective_user
-        if update.effective_message and user and self.router.is_admin(user.id):
-            await update.effective_message.reply_text("Use /menu to open the dashboard.")
+        """Plain messages and files. Anything that may contain key material is deleted first."""
+        msg, user = update.effective_message, update.effective_user
+        if msg is None:
+            return
+        admin = bool(user and self.router.is_admin(user.id))
+        if admin and await self.keys.message(msg, user.id):  # type: ignore[union-attr]
+            return
+        if await self.keys.scrub(msg):
+            if admin:
+                await msg.chat.send_message("🫥 That looked like a private key, so I deleted it. "
+                                            "To connect Kalshi, send /setkey first.")
+            return
+        if admin and msg.text:
+            await msg.reply_text("Use /menu to open the dashboard.")
 
     async def error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         log.error("TELEGRAM_HANDLER_ERROR error=%r", context.error, exc_info=context.error)

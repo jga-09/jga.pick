@@ -18,6 +18,8 @@ from app.config import Settings
 from app.data.underlying import NullUnderlyingProvider, UnderlyingPriceProvider
 from app.database.repository import Repository
 from app.errors import KalshiAuthError, KalshiError, TradingError
+from app.kalshi.auth import KalshiSigner
+from app.kalshi.keystore import KeyStore
 from app.kalshi.market_data import MarketDataService, MarketInfo, MarketSnapshot
 from app.kalshi.markets import MarketDiscovery
 from app.kalshi.websocket import KalshiWebSocket
@@ -145,6 +147,52 @@ class BotRuntime:
     def mode_permitted(self, mode: str | None = None) -> bool:
         mode = mode or self.state.mode
         return mode == "paper" or (self.settings.live_allowed and self.live is not None)
+
+    # ------------------------------------------------------- Kalshi API key
+    @property
+    def key_store(self) -> KeyStore:
+        return KeyStore(self.settings.kalshi_key_dir)
+
+    def kalshi_key_source(self) -> str:
+        """'env', 'telegram' or 'none' - which credentials the client is signing with."""
+        if getattr(self.client, "signer", None) is None:
+            return "none"
+        return "env" if self.settings.env_key_usable else "telegram"
+
+    async def set_kalshi_key(self, key_id: str, pem: bytes) -> float | None:
+        """Verify a key against Kalshi, then store it. Returns the balance in USD (None if unverified).
+
+        Raises KalshiAuthError if the key is invalid or Kalshi rejects it; nothing is stored then."""
+        if self.fixture_mode or not hasattr(self.client, "signer"):
+            raise KalshiAuthError(0, "fixture mode does not use Kalshi credentials")
+        signer = KalshiSigner(key_id, pem)  # raises on a bad PEM (message never contains key material)
+        old = self.client.signer
+        self.client.signer = signer
+        balance: float | None = None
+        try:
+            raw = await self.client.get_balance()
+            cents_ = raw.get("balance")
+            balance = None if cents_ is None else float(cents_) / 100
+        except KalshiAuthError:
+            self.client.signer = old
+            self.client.auth_failed = False
+            raise
+        except KalshiError:
+            pass  # network problem: keep the key, report it as not yet verified
+        self.key_store.save(key_id, pem)
+        if self.ws is not None:
+            self.ws.signer = signer
+        self.repo.add_event("KALSHI_KEY_SET", f"key {key_id[:4]}... via Telegram")
+        log.info("KALSHI_KEY_SET key=%s... verified=%s", key_id[:4], balance is not None)
+        return balance
+
+    def clear_kalshi_key(self) -> bool:
+        removed = self.key_store.clear()
+        if self.kalshi_key_source() == "telegram":
+            self.client.signer = None
+        if removed:
+            self.repo.add_event("KALSHI_KEY_REMOVED", "via Telegram")
+        return removed
 
     async def notify(self, kind: str, key: str, text: str, buttons: list | None = None) -> None:
         if self.notifier is None:
