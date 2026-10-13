@@ -328,7 +328,7 @@ class CallbackRouter:
         if ticket is None:
             return Response(None, toast="Ticket expired or already used", alert=True)
         pos = await self.rt.execute_ticket(ticket, confirmed=True)
-        return Response(M.trade_result(pos), toast="✅ Order filled")
+        return Response(M.trade_result(pos, *self.rt._card_meta(pos)), toast="✅ Order filled")
 
     async def _on_tno(self, uid: int, ticket_id: str) -> Response:
         self.rt.tickets.discard(ticket_id)

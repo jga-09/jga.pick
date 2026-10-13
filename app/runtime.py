@@ -499,9 +499,10 @@ class BotRuntime:
                     "spot": b.features.spot, "dist_sigma": b.features.dist_sigma,
                     "warnings": list(b.warnings), "risk_level": self.state.risk_level.value,
                 }
+            entry["direction"], entry["why"] = self._card_read(sig, pos)
             self.repo.save_trade_context(pos.id, pos.ticker, entry=entry)
         self.repo.add_event("TRADE_OPENED", f"{pos.mode} {pos.ticker} {pos.side} x{pos.contracts}@{pos.entry_price}")
-        await self.notify("trade_opened", f"open:{pos.id}", messages.trade_opened_alert(pos))
+        await self.notify("trade_opened", f"open:{pos.id}", messages.trade_opened_alert(pos, *self._card_meta(pos)))
         return pos
 
     async def close_position(self, position_id: int, *, confirmed: bool) -> float:
@@ -516,6 +517,29 @@ class BotRuntime:
         await self._after_close(pos)
         return pnl
 
+    @staticmethod
+    def _card_read(sig: SignalResult, pos: Position) -> tuple[str, str]:
+        """UP/DOWN meaning of the bought side and a one-line reason, for the trade cards."""
+        b = sig.btc
+        if b is not None and b.terms.kind is not None:
+            direction = b.terms.direction_for_side(pos.side)
+            if b.edge is not None:
+                return direction, (f"bot's estimate {b.edge.p_low * 100:.0f}%+ vs price {b.edge.ask:.0f}¢ "
+                                   f"(estimate, not a guarantee)")
+            return direction, ""
+        direction = "UP" if pos.side == "yes" else "DOWN"
+        top = next((r.text for r in sig.reasons if r.positive), "")
+        return direction, top
+
+    def _card_meta(self, pos: Position, with_summary: bool = False) -> tuple:
+        ctx = self.repo.trade_context(pos.id) if pos.id is not None else None
+        entry = (ctx or {}).get("entry", {})
+        direction = entry.get("direction") or ("UP" if pos.side == "yes" else "DOWN")
+        why = entry.get("why") or ""
+        if with_summary:
+            return direction, why, (ctx or {}).get("summary") or ""
+        return direction, why
+
     def _analyze_close(self, pos: Position) -> None:
         if pos.id is None:
             return
@@ -529,7 +553,8 @@ class BotRuntime:
 
     async def _after_close(self, pos: Position) -> None:
         self._analyze_close(pos)
-        await self.notify("trade_closed", f"close:{pos.id}", messages.trade_closed_alert(pos))
+        direction, _why, summary = self._card_meta(pos, with_summary=True)
+        await self.notify("trade_closed", f"close:{pos.id}", messages.trade_closed_alert(pos, direction, summary))
         limit = self.settings.large_loss_alert_usd
         if limit > 0 and (pos.realized_pnl or 0) <= -limit:
             await self.notify("large_loss", f"loss:{pos.id}", messages.large_loss_alert(pos))

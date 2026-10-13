@@ -49,7 +49,7 @@ async def test_admin_paper_trade_flow(runtime, router):
     tok = resp.screen.buttons[0][0][1]
     assert tok.startswith("tok:")
     resp = await router.handle(ADMIN_ID, tok)
-    assert "FILLED" in resp.screen.text
+    assert "Trade Taken" in resp.screen.text
     again = await router.handle(ADMIN_ID, tok)
     assert again.screen is None and "already used" in again.toast
     assert len(runtime.portfolio.open_positions()) == 1

@@ -515,3 +515,28 @@ def test_report_runs_and_is_labelled(synthetic: Path, tmp_path: Path) -> None:
     save_report(rep, path)
     assert load_report(path)["verdict"] == rep["verdict"] and "VERDICT" in format_report(rep)
     json.loads(path.read_text())
+
+
+def test_trade_cards_layout():
+    from app.telegram import messages as M
+    from app.trading.positions import Position
+
+    def pos(**kw):
+        p = Position(mode="paper", ticker="KXBTC15M-X", event_ticker="E", asset="BTC", label="BTC 15M",
+                     side="no", contracts=1, entry_price=44.0, entry_fee=0.02, risk_level="low", id=1)
+        for k, v in kw.items():
+            setattr(p, k, v)
+        return p
+
+    opened = M.trade_opened_alert(pos(), "DOWN", "bot's estimate 62%+ vs price 44¢")
+    assert "Trade Taken" in opened and "BTC ▼ DOWN" in opened and "1 share @ 44¢" in opened
+    assert "total $0.46" in opened and "Read:" in opened
+    won = M.trade_closed_alert(pos(status="closed", exit_price=100.0, realized_pnl=0.54, close_reason="settled NO"),
+                               "DOWN")
+    assert "WON" in won and "+$0.54" in won
+    lost = M.trade_closed_alert(pos(status="closed", exit_price=0.0, realized_pnl=-0.46, close_reason="settled YES"),
+                                "UP")
+    assert "Lost" in lost and "−$0.46" in lost and "BTC ▲ UP" in lost
+    out = M.trade_closed_alert(pos(status="closed", exit_price=91.0, realized_pnl=0.44, close_reason="manual exit"),
+                               "DOWN")
+    assert "CASHED OUT" in out and "sold @ 91¢" in out and "Locked in" in out

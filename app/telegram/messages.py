@@ -6,6 +6,7 @@ from html import escape
 from typing import TYPE_CHECKING, Any
 
 from app import DISPLAY_NAME as APP_NAME
+from app import __version__
 from app.kalshi.market_data import ASSET_ICONS, MarketSnapshot
 from app.risk.profiles import RiskLevel, RiskProfile
 from app.strategy.signals import Direction, SignalResult, Validity
@@ -651,11 +652,9 @@ def ticket_screen(t: TradeTicket) -> Screen:
     return Screen("\n".join(lines), buttons, route="home")
 
 
-def trade_result(pos: Position) -> Screen:
-    head = "⚠️ <b>REAL-MONEY ORDER FILLED</b>" if pos.mode == "live" else "✅ <b>PAPER TRADE FILLED</b>"
-    text = (f"{head}\n\n{escape(pos.label)}\nBought {pos.side.upper()} x{pos.contracts} @ {cents(pos.entry_price)}\n"
-            f"Cost {money(pos.cost, False)} + fees {money(pos.entry_fee, False)}\n"
-            f"Settles when the market closes - you'll get a message.")
+def trade_result(pos: Position, direction: str = "", why: str = "") -> Screen:
+    text = trade_card(pos, direction or ("UP" if pos.side == "yes" else "DOWN"), why)
+    text += "\n<i>Settles when the market closes - you'll get a message.</i>"
     return Screen(text, [[("💰 Trades", "trades:0"), ("🏠 Home", "home")]], route="pos")
 
 
@@ -740,15 +739,69 @@ def flip_alert(flip: SignalFlip) -> str:
                       "Previous:", f"{p.confidence}%", "", "New:", f"{c.confidence}%", "", "Reason:", escape(reason)])
 
 
-def trade_opened_alert(pos: Position) -> str:
-    return (f"{'⚠️ LIVE' if pos.mode == 'live' else '📝 PAPER'} <b>TRADE OPENED</b>\n{escape(pos.label)} · "
-            f"BUY {pos.side.upper()} x{pos.contracts} @ {cents(pos.entry_price)}")
+CARD_LINE = "────────────"
 
 
-def trade_closed_alert(pos: Position) -> str:
-    return (f"{'✅' if pos.won else '❌'} <b>TRADE CLOSED</b> · {pos.mode.upper()}\n{escape(pos.label)} "
-            f"{pos.side.upper()} @ {cents(pos.entry_price)} → {cents(pos.exit_price)}\n"
-            f"P&L: {money(pos.realized_pnl)} ({escape(pos.close_reason or '')})")
+def _footer(pos: Position | None = None) -> str:
+    mode = "" if pos is None else f" · {'🔴 Live' if pos.mode == 'live' else '📝 Paper'}"
+    return f"<i>{APP_NAME} v{__version__}</i>{mode}"
+
+
+def _dir(pos: Position, direction: str) -> str:
+    arrow = "▲" if direction == "UP" else "▼"
+    return f"<b>{escape(pos.asset)} {arrow} {direction}</b>"
+
+
+def _signed(v: float | None) -> str:
+    v = v or 0.0
+    return f"{'+' if v >= 0 else '−'}${abs(v):,.2f}"
+
+
+def _sh(n: int, short: bool = False) -> str:
+    return f"{n} sh" if short else f"{n} share{'' if n == 1 else 's'}"
+
+
+def trade_card(pos: Position, direction: str, why: str = "") -> str:
+    """Compact "Trade Taken" card (also used after a manual confirm)."""
+    mode = "🔴 Live" if pos.mode == "live" else "📝 Paper"
+    lines = [
+        f"🟢 <b>Trade Taken</b>  ·  {mode}",
+        f"{_dir(pos, direction)}  ·  {escape(pos.label)}",
+        CARD_LINE,
+        f"{_sh(pos.contracts)} @ {pos.entry_price:.0f}¢",
+        f"cost <b>{money(pos.cost, False)}</b>  ·  fee {money(pos.entry_fee, False)}  ·  "
+        f"total {money(pos.cost + pos.entry_fee, False)}",
+    ]
+    if why:
+        lines.append(f"📖 <i>Read: {escape(why, quote=False)}</i>")
+    return "\n".join(lines + ["", _footer()])
+
+
+def trade_opened_alert(pos: Position, direction: str = "", why: str = "") -> str:
+    return trade_card(pos, direction or ("UP" if pos.side == "yes" else "DOWN"), why)
+
+
+def trade_closed_alert(pos: Position, direction: str = "", summary: str = "") -> str:
+    direction = direction or ("UP" if pos.side == "yes" else "DOWN")
+    pnl = pos.realized_pnl or 0.0
+    reason = pos.close_reason or ""
+    if reason.startswith("settled"):
+        head = "🎉 <b>WON</b>" if pos.won else "❌ <b>Lost</b>"
+        body = [
+            f"{escape(pos.label)}  ·  {_sh(pos.contracts, True)} @ {pos.entry_price:.0f}¢",
+            f"cost {money(pos.cost, False)}  →  <b>{_signed(pnl)}</b>  {'✅' if pos.won else ''}".rstrip(),
+        ]
+    else:
+        head = "💰 <b>CASHED OUT</b>" if pnl >= 0 else "✂️ <b>SOLD EARLY</b>"
+        body = [
+            f"{_sh(pos.contracts, True)} @ {pos.entry_price:.0f}¢  →  sold @ {(pos.exit_price or 0):.0f}¢",
+            f"{'Locked in' if pnl >= 0 else 'Loss'}  <b>{_signed(pnl)}</b>  {'🔒' if pnl >= 0 else ''}".rstrip(),
+        ]
+        if reason:
+            body.append(f"<i>{escape(reason)}</i>")
+    if summary:
+        body.append(f"📖 <i>Read: {escape(summary, quote=False)}</i>")
+    return "\n".join([f"{head}  ·  {_dir(pos, direction)}", CARD_LINE, *body, "", _footer(pos)])
 
 
 def large_loss_alert(pos: Position) -> str:
