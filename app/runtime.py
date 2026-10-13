@@ -717,12 +717,13 @@ class BotRuntime:
             self.record_btc_observation(sig.btc, snap)
 
         flip = self.engine.detect_flip(sig)
-        if flip:
+        if flip and self.settings.signal_alerts:
             await self.notify("flip", f"flip:{snap.ticker}", messages.flip_alert(flip))
         decision = self.check_risk(sig, snap)
         strong = (decision.approved and sig.grade in ("A+", "A")
                   and sig.confidence >= self.settings.strong_signal_alert_min_confidence)
-        if strong and self._strong.get(snap.ticker) != sig.direction.value:
+        quiet = not self.settings.signal_alerts and self.state.auto_trade
+        if strong and not quiet and self._strong.get(snap.ticker) != sig.direction.value:
             self._strong[snap.ticker] = sig.direction.value
             text, buttons = messages.strong_signal_alert(sig, snap, decision, self.state)
             await self.notify("strong_signal", f"strong:{snap.ticker}:{sig.direction.value}", text, buttons)

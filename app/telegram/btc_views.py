@@ -274,9 +274,8 @@ def home(rt: BotRuntime) -> Screen:
             lines += [f"🎯 Signal: <b>{_arrow(b.terms.direction_for_side(e.side))}</b> · BUY {e.side.upper()}",
                       f"Bot's odds: {_pct(e.p_point)} · Edge {e.ev_low_cents:+.0f}¢"]
         else:
-            lean = f" (leans {_arrow(b.leaning)})" if b.leaning in ("UP", "DOWN") else ""
             why = reasons(b, d, 1)
-            lines += [f"🎯 Signal: ⚪ NO TRADE{lean}", f"💬 {escape(why[0]) if why else 'Waiting for a good setup'}"]
+            lines += ["🎯 Signal: ⚪ NO TRADE", f"💬 {escape(why[0]) if why else 'Waiting for a good setup'}"]
         if b.terms.threshold is not None:
             lines.append(f"₿ {_big(b.features.spot)} vs target {_big(b.terms.threshold)}")
         if snap:

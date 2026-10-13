@@ -111,6 +111,9 @@ class Settings(BaseSettings):
     # --- Telegram UI / alerts -------------------------------------------
     dashboard_refresh_sec: float = Field(15.0, ge=3)
     alert_cooldown_sec: float = Field(120.0, ge=0)
+    # false = quiet: no "signal flip" messages, and no "trade found" alerts while auto trade is on
+    # (the trade card is sent when a trade is actually taken). Set true to get every signal alert.
+    signal_alerts: bool = False
     strong_signal_alert_min_confidence: int = Field(80, ge=0, le=100)
     large_loss_alert_usd: float = Field(5.0, ge=0)
 

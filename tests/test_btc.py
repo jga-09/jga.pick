@@ -549,3 +549,35 @@ def test_longshot_guard_blocks_cheap_contracts():
     profiles = load_profiles(read_env=False)
     assert profiles[RiskLevel.LOW].min_entry_price_cents >= 30
     assert profiles[RiskLevel.HIGH].min_entry_price_cents >= 15
+
+
+async def test_quiet_mode_sends_no_signal_alerts(runtime, monkeypatch):
+    from tests.conftest import make_info, quote_snapshot
+
+    sent: list[str] = []
+
+    async def notify(kind, key, text, buttons=None):
+        sent.append(kind)
+
+    monkeypatch.setattr(runtime, "notify", notify)
+    monkeypatch.setattr(runtime.engine, "detect_flip", lambda sig: object())
+    assert runtime.settings.signal_alerts is False
+    runtime.store.update(auto_trade=True)
+    await runtime.process_snapshot(quote_snapshot(make_info()))
+    assert "flip" not in sent and "strong_signal" not in sent
+
+
+async def test_signal_alerts_on_still_sends_flips(runtime, monkeypatch):
+    from tests.conftest import make_info, quote_snapshot
+
+    sent: list[str] = []
+
+    async def notify(kind, key, text, buttons=None):
+        sent.append(kind)
+
+    runtime.settings = runtime.settings.model_copy(update={"signal_alerts": True})
+    monkeypatch.setattr(runtime, "notify", notify)
+    monkeypatch.setattr(runtime.engine, "detect_flip", lambda sig: "flip")
+    monkeypatch.setattr("app.runtime.messages.flip_alert", lambda flip: "flip!")
+    await runtime.process_snapshot(quote_snapshot(make_info()))
+    assert "flip" in sent
