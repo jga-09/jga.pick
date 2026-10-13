@@ -375,20 +375,39 @@ RISK_FIELDS: dict[str, tuple[str, str, float]] = {
     "time": ("min_time_remaining_sec", "Min Time s", 30),
     "spr": ("max_spread_cents", "Max Spread ¢", 1),
     "qual": ("min_signal_quality", "Quality", 5),
-    "ev": ("min_ev_cents", "Min edge ¢", 1),
+    "ev": ("min_ev_cents", "Min Edge ¢", 1),
     "str": ("min_btc_strength", "Strength", 5),
 }
 
 
+BTC_CUSTOM_FIELDS = ("ev", "str", "pos", "open", "loss", "time", "spr")
+QUALITY_CUSTOM_FIELDS = ("conf", "pos", "open", "loss", "time", "spr", "qual")
+
+
+def _custom_lines(p: RiskProfile, btc: bool) -> list[str]:
+    if not btc:
+        return [*profile_params(p), f"Max Exposure: ${p.max_total_exposure_usd:g}"]
+    return [
+        f"Min Edge: {p.min_ev_cents:+g}¢",
+        f"Strength: ≥ {p.min_btc_strength}",
+        f"Max Position: ${p.max_position_usd:g}",
+        f"Max Open: {p.max_open_positions}",
+        f"Daily Loss Limit: ${p.max_daily_loss_usd:g}",
+        f"Min Time: {p.min_time_remaining_sec} sec",
+        f"Max Spread: {p.max_spread_cents:g}¢",
+        f"Max Exposure: ${p.max_total_exposure_usd:g}",
+    ]
+
+
 def risk_customize(rt: BotRuntime, note: str = "") -> Screen:
     p = rt.profile()
-    lines = [f"⚙️ <b>CUSTOMIZE {p.level.badge}</b>", "", *profile_params(p, rt.btc_mode),
-             f"Max Exposure: ${p.max_total_exposure_usd:g}", "",
+    lines = [f"⚙️ <b>CUSTOMIZE {p.level.badge}</b>", "", *_custom_lines(p, rt.btc_mode), "",
              "<i>Hard safety limits apply to every profile.</i>"]
     if note:
         lines += ["", escape(note)]
     rows: list[list[Button]] = []
-    for code, (_, label, _) in RISK_FIELDS.items():
+    for code in (BTC_CUSTOM_FIELDS if rt.btc_mode else QUALITY_CUSTOM_FIELDS):
+        label = RISK_FIELDS[code][1]
         rows.append([(f"➖ {label}", f"radj:{code}:-"), (f"➕ {label}", f"radj:{code}:+")])
     rows.append([("♻️ Reset", "rrst"), ("🔙 Back", "risk")])
     return Screen("\n".join(lines), rows, route="rcust")

@@ -69,6 +69,9 @@ _ACCOUNT = (
 
 
 # ------------------------------------------------------------------ helpers
+SEP = "━━━━━━━━━━━━━━━━━━"
+
+
 def escape(text: str) -> str:
     return _html_escape(text, quote=False)  # keep apostrophes readable
 
@@ -209,44 +212,85 @@ def _control_buttons(rt: BotRuntime) -> list[list[Button]]:
 
 
 # ------------------------------------------------------------------ home
+def _arrow(direction: str) -> str:
+    return {"UP": "🟢 UP", "DOWN": "🔴 DOWN"}.get(direction, "⚪ —")
+
+
+HOME_MENU: list[Button] = [
+    ("🟢 Start", "start"), ("⚙️ Config", "cfg"),
+    ("🛑 Stop", "stop"), ("📊 Status", "status"),
+    ("🎯 Signals", "btc"), ("💰 Trades", "trades:0"),
+    ("🛡 Risk", "risk"), ("📜 History", "banl"),
+    ("🧠 Strategy", "strat"), ("🧹 Clear", "clear"),
+]
+
+
 def home(rt: BotRuntime) -> Screen:
     st = rt.state
     v = btc_view(rt)
     b = v.signal.btc if v and v.signal else None
     d = v.decision if v else None
     kalshi, btc_feed = _feeds(rt)
+    if kalshi == "🧪" or btc_feed == "🧪":
+        data = "🧪 Fixture Data"
+    elif kalshi == "🟢" and btc_feed == "🟢":
+        data = "🟢 Live Data"
+    elif not st.running:
+        data = "⚪ Data off"
+    else:
+        data = f"🟡 Data: Kalshi {kalshi} BTC {btc_feed}"
+    approved = bool(b is not None and d is not None and d.approved and b.edge)
+    if st.emergency_stop:
+        status_line = "🚨 EMERGENCY STOP — orders blocked"
+    elif not st.running:
+        status_line = "⚪ Offline — press 🟢 Start"
+    elif v is None:
+        status_line = "🔍 Searching for the next BTC 15M market"
+    elif approved:
+        status_line = "🟢 Online — trade setup active"
+    else:
+        status_line = "🟢 Online — waiting for a good setup"
+    s = rt.portfolio.stats(st.mode, days=0)
+    opens = rt.portfolio.open_positions(st.mode)
     lines = [
-        f"📡 <b>{DISPLAY_NAME}</b> · ₿ BTC · {_state_line(rt)}",
-        f"{_mode(rt)} · {st.risk_level.emoji} {st.risk_level.value.title()} risk · "
-        f"🤖 Auto {'on' if st.auto_trade else 'off'}",
-        f"Kalshi {kalshi}   BTC price {btc_feed}",
-        LINE,
+        f"📡 <b>{DISPLAY_NAME}</b>",
+        f"{_state_line(rt)} · {data}",
+        status_line,
+        f"🎯 Market: {escape(v.info.label) if v else '—'}",
+        SEP,
+        f"📊 Today: {_usd(s.realized)}",
+        f"📈 WR: {_pct(None if s.win_rate is None else s.win_rate / 100)}"
+        f" · Trades: {s.trades}",
+        f"💰 Open: {len(opens)} · Bal: {_usd(rt.portfolio.balance(st.mode), signed=False)}",
+        SEP,
     ]
-    if v is None:
-        lines += ["🔍 Looking for the next BTC 15-minute market…" if st.running else "Tap ▶️ Start to begin."]
+    if v is None or b is None:
+        lines += ["🎯 Signal: ⚪ —", "Collecting market data…" if st.running else "Press 🟢 Start to begin"]
     else:
         snap = v.snapshot
-        lines += [_question(b, v), f"⏱ {_left(v.info.time_remaining())} left"
-                  + (f" · YES {_c(snap.yes_ask)} · NO {_c(snap.no_ask)}" if snap else "")]
-        if b is not None:
-            lines.append(_btc_vs_target(b))
-        lines.append("")
-        if b is None:
-            lines.append("⏳ Collecting data…")
-        elif d is not None and d.approved and b.edge:
+        if approved:
             e = b.edge
-            lines += [f"{b.emoji} <b>Trade found: BUY {e.side.upper()} at {_c(e.ask)}</b>",
-                      f"Bot's odds {_pct(e.p_point)} · profit after fees ≈ {e.ev_low_cents:+.0f}¢ per contract"]
+            lines += [f"🎯 Signal: <b>{_arrow(b.terms.direction_for_side(e.side))}</b> · BUY {e.side.upper()}",
+                      f"Bot's odds: {_pct(e.p_point)} · Edge {e.ev_low_cents:+.0f}¢"]
         else:
+            lean = f" (leans {_arrow(b.leaning)})" if b.leaning in ("UP", "DOWN") else ""
             why = reasons(b, d, 1)
-            lines += ["⚪ <b>No trade right now</b>", escape(why[0]) if why else "Waiting for a good setup"]
-    s = rt.portfolio.stats(st.mode, days=0)
-    today = f"Today: {_n(s.trades, 'trade')}"
-    if s.trades:
-        today += f" · {s.wins} won · {_usd(s.realized)}"
-    lines += [LINE, today]
-    buttons = grid2([("₿ Signal", "btc"), ("💰 Trades", "trades:0"), ("📈 Results", "banl"), ("⚙️ Settings", "cfg")])
-    return Screen("\n".join(lines), buttons + _control_buttons(rt), route="home", refreshable=True)
+            lines += [f"🎯 Signal: ⚪ NO TRADE{lean}", f"💬 {escape(why[0]) if why else 'Waiting for a good setup'}"]
+        if b.terms.threshold is not None:
+            lines.append(f"₿ {_big(b.features.spot)} vs target {_big(b.terms.threshold)}")
+        if snap:
+            lines.append(f"YES {_c(snap.yes_ask)} · NO {_c(snap.no_ask)}")
+        lines.append(f"⏱ {_left(v.info.time_remaining())}")
+    lines += [
+        SEP,
+        f"🛡 {st.risk_level.badge} RISK",
+        f"{'💵 LIVE' if st.mode == 'live' else '📝 PAPER'} MODE",
+        f"🤖 Auto Trade: {'ON' if st.auto_trade else 'OFF'}",
+    ]
+    buttons = list(HOME_MENU)
+    buttons += [("▶️ Resume", "resume") if st.paused else ("⏸ Pause", "pause"),
+                ("🔓 E-Stop off", "estop") if st.emergency_stop else ("🚨 E-Stop", "estop")]
+    return Screen("\n".join(lines), grid2(buttons), route="home", refreshable=True)
 
 
 # ------------------------------------------------------------------ signal
