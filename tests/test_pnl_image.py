@@ -63,3 +63,24 @@ def test_logo_asset_is_bundled():
     from app.telegram.pnl_image import LOGO
 
     assert LOGO.is_file()
+
+
+async def test_dashboard_from_database(runtime):
+    from datetime import timedelta
+
+    from app.telegram.pnl_dashboard import render_dashboard
+    from app.utils.time import utcnow
+
+    for i, pnl in enumerate((0.8, -0.4, 1.1)):
+        p = _pos(pnl, "yes" if i % 2 == 0 else "no")
+        p.close_reason, p.exit_price = "settled YES", 100.0
+        p.closed_at = utcnow() - timedelta(hours=i)
+        runtime.repo.save_position(p)
+    old = _pos(5.0)
+    old.close_reason, old.closed_at = "settled YES", utcnow() - timedelta(days=20)
+    runtime.repo.save_position(old)
+    data = runtime.pnl_dashboard("paper")
+    assert len(data.trades) == 3 and data.prev_period_pnl == 5.0
+    assert [r.pos.realized_pnl for r in data.trades] == [1.1, -0.4, 0.8]  # oldest first
+    assert render_dashboard(data)[:4] == b"\x89PNG"
+    assert not runtime.pnl_dashboard("live").trades  # paper and live never mixed

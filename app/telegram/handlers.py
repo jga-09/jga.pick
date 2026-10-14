@@ -51,10 +51,10 @@ class Handlers:
         assert uid is not None
         if cmd == "pnl" and self.router.rt.settings.pnl_image:
             from app import DISPLAY_NAME
-            from app.telegram.pnl_image import render_pnl_card
+            from app.telegram.pnl_dashboard import render_dashboard
 
             rt = self.router.rt
-            png = render_pnl_card(rt.pnl_card(rt.state.mode), DISPLAY_NAME)
+            png = render_dashboard(rt.pnl_dashboard(rt.state.mode), DISPLAY_NAME)
             await msg.reply_photo(png, caption="📊 Today's P&L")
             return
         if cmd in KEY_COMMANDS:

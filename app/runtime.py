@@ -11,7 +11,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
 from app import DISPLAY_NAME
@@ -21,7 +21,8 @@ from app.database.repository import Repository
 from app.errors import KalshiAuthError, KalshiError, TradingError
 from app.kalshi.auth import KalshiSigner
 from app.kalshi.keystore import KeyStore
-from app.telegram.pnl_image import PnlCard, render_pnl_card
+from app.telegram.pnl_dashboard import DashboardData, TradeRow, render_dashboard
+from app.telegram.pnl_image import ET, PnlCard
 from app.kalshi.market_data import MarketDataService, MarketInfo, MarketSnapshot
 from app.kalshi.markets import MarketDiscovery
 from app.kalshi.websocket import KalshiWebSocket
@@ -219,14 +220,30 @@ class BotRuntime:
         all_time = self.portfolio.stats(mode).realized
         return PnlCard(title, mode, today, self.portfolio.balance(mode), all_time, last, last_direction)
 
+    def pnl_dashboard(self, mode: str, days: int = 14, title: str = "P&L OVERVIEW") -> DashboardData:
+        """Real finished trades for ``mode`` over the last ``days`` ET days (plus the period before)."""
+        today = utcnow().astimezone(ET).date()
+        start_et = datetime.combine(today - timedelta(days=days - 1), datetime.min.time(), tzinfo=ET)
+        since = start_et.astimezone(UTC)
+        prev_since = (start_et - timedelta(days=days)).astimezone(UTC)
+        rows_all = self.repo.closed_positions(mode=mode, since=prev_since, limit=100_000)
+        rows = [p for p in rows_all if p.closed_at and p.closed_at >= since]
+        prev = [p for p in rows_all if p.closed_at and p.closed_at < since]
+        trades = []
+        for pos in reversed(rows):  # oldest first
+            ctx = self.repo.trade_context(pos.id) if pos.id is not None else None
+            trades.append(TradeRow(pos, ((ctx or {}).get("entry") or {}).get("direction", "")))
+        prev_pnl = sum(p.realized_pnl or 0 for p in prev) if prev else None
+        return DashboardData(mode, trades, prev_pnl, self.portfolio.balance(mode), days, title, today)
+
     async def send_pnl_image(self, kind: str, key: str, caption: str, mode: str, last: Position | None = None,
                              last_direction: str = "", title: str = "TODAY'S P&L") -> bool:
         """P&L image with ``caption``. Returns False when disabled or failed (caller sends text instead)."""
         if not self.settings.pnl_image or self.notifier is None or not hasattr(self.notifier, "photo"):
             return False
         try:
-            card = self.pnl_card(mode, title, last, last_direction)
-            png = await asyncio.to_thread(render_pnl_card, card, DISPLAY_NAME)
+            data = self.pnl_dashboard(mode, title="SESSION SUMMARY" if title.startswith("SESSION") else "P&L OVERVIEW")
+            png = await asyncio.to_thread(render_dashboard, data, DISPLAY_NAME)
             return await self.notifier.photo(kind, key, png, caption)
         except Exception:  # noqa: BLE001 - an image problem must never block trade messages
             log.exception("PNL_IMAGE_FAILED kind=%s", kind)
