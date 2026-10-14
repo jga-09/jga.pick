@@ -290,7 +290,9 @@ def home(rt: BotRuntime) -> Screen:
     buttons = list(HOME_MENU)
     buttons += [("▶️ Resume", "resume") if st.paused else ("⏸ Pause", "pause"),
                 ("🔓 E-Stop off", "estop") if st.emergency_stop else ("🚨 E-Stop", "estop")]
-    return Screen("\n".join(lines), grid2(buttons), route="home", refreshable=True)
+    connected = rt.kalshi_key_source() != "none"
+    kalshi_row = [("🔑 Kalshi API ✅" if connected else "🔑 Connect Kalshi API", "kacct")]
+    return Screen("\n".join(lines), grid2(buttons) + [kalshi_row], route="home", refreshable=True)
 
 
 # ------------------------------------------------------------------ signal

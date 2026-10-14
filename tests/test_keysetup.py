@@ -163,3 +163,10 @@ async def test_account_screen_and_buttons(runtime):
     assert resp.start_key_setup
     scr = btc_views.account(runtime, {"source": "telegram", "balance": 12.5, "positions": 1, "error": None})
     assert "$12.50" in scr.text and "Remove key" in str(scr.buttons) and "confirm" in scr.text
+
+
+def test_home_has_kalshi_button(runtime):
+    from app.telegram import btc_views
+
+    scr = btc_views.home(runtime)
+    assert ("🔑 Connect Kalshi API", "kacct") in [b for row in scr.buttons for b in row]
