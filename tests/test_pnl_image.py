@@ -57,3 +57,9 @@ async def test_stop_sends_session_summary(runtime):
     runtime.notifier = FakeNotifier()
     await runtime.stop()
     assert [k for k, _ in runtime.notifier.photos] == ["session_summary"]
+
+
+def test_logo_asset_is_bundled():
+    from app.telegram.pnl_image import LOGO
+
+    assert LOGO.is_file()
