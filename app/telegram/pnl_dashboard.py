@@ -1,5 +1,5 @@
 """Dashboard-style P&L image (PNG): JGA Picks branding, stat tiles, daily profit bars,
-trade history and streak.
+today's result and slogan filler.
 
 Only real, finished trades for ONE mode (paper or live) are drawn. Nothing is projected.
 No third-party logos are used; Kalshi is named in text only.
@@ -18,7 +18,7 @@ from PIL import Image, ImageDraw, ImageFilter
 from app.telegram.pnl_image import ET, LOGO, _font
 from app.trading.positions import Position
 
-W, H = 1200, 1320
+W, H = 1200, 1190
 M = 28  # outer margin
 
 BG = (10, 11, 13)
@@ -72,25 +72,6 @@ def _panel(d: ImageDraw.ImageDraw, box: tuple[int, int, int, int], title: str | 
         d.text((box[0] + 22, box[1] + 18), title, font=_font(22, True), fill=INK)
 
 
-def _status(p: Position) -> tuple[str, tuple, tuple]:
-    pnl = p.realized_pnl or 0.0
-    if not (p.close_reason or "").startswith("settled"):
-        return "CASHED", INK_2, (34, 38, 45)
-    return ("WIN", GOOD, GOOD_BG) if pnl > 0 else ("LOSS", BAD, BAD_BG)
-
-
-def _streak(rows: list[TradeRow]) -> tuple[int, bool]:
-    n, win = 0, True
-    for i, r in enumerate(reversed(rows)):
-        w = (r.pos.realized_pnl or 0) > 0
-        if i == 0:
-            win = w
-        if w != win:
-            break
-        n += 1
-    return n, win
-
-
 def _header(img: Image.Image, d: ImageDraw.ImageDraw, data: DashboardData) -> None:
     # textured dark band (generated noise + soft shapes; no photos or third-party marks)
     band = Image.new("RGB", (W, 200), (16, 17, 20))
@@ -125,6 +106,44 @@ def _header(img: Image.Image, d: ImageDraw.ImageDraw, data: DashboardData) -> No
     rng = f"{start:%b %d} – {data.today:%b %d, %Y}".replace(" 0", " ")
     rf = _font(16)
     d.text((W - M - d.textlength(rng, font=rf), 114), rng, font=rf, fill=INK_3)
+
+
+def _crown(d: ImageDraw.ImageDraw, x: float, y: float, w: float, color, width: int = 3) -> None:
+    h = w * 0.62
+    pts = [(x, y + h), (x, y + h * 0.25), (x + w * 0.27, y + h * 0.55), (x + w * 0.5, y),
+           (x + w * 0.73, y + h * 0.55), (x + w, y + h * 0.25), (x + w, y + h)]
+    d.line([*pts, pts[0]], fill=color, width=width, joint="curve")
+    for px, py in (pts[1], pts[3], pts[5]):
+        d.ellipse((px - 4, py - 4, px + 4, py + 4), fill=color)
+
+
+def _slogan(img: Image.Image, box: tuple[int, int, int, int]) -> None:
+    """'GOOD PICKS MAKE MONEY' as tilted, hand-placed filler with a crown and small tags."""
+    x0, y0, x1, y1 = box
+    layer = Image.new("RGBA", (560, 300), (0, 0, 0, 0))
+    ld = ImageDraw.Draw(layer)
+    f = _font(52, True)
+    ld.text((10, 10), "GOOD PICKS", font=f, fill=(*INK, 235))
+    ld.text((40, 82), "MAKE MONEY", font=f, fill=(*INK, 235))
+    _crown(ld, 400, 168, 74, (*INK, 235), width=4)
+    ld.line((40, 158, 360, 158), fill=(*GOOD, 230), width=4)
+    layer = layer.rotate(7, resample=Image.BICUBIC, expand=True)
+    img.paste(layer, (x0 + 36, y0 - 6), layer)
+    d = ImageDraw.Draw(img)
+    tags = ["RESEARCH", "ANALYZE", "PROFIT"]
+    tf = _font(13, True)
+    tx = x0 + 30
+    ty = y1 - 48
+    for t in tags:
+        tw = d.textlength(t, font=tf) + 24
+        d.rounded_rectangle((tx, ty, tx + tw, ty + 26), radius=13, outline=BORDER, width=1)
+        d.text((tx + 12, ty + 5), t, font=tf, fill=INK_2)
+        tx += tw + 10
+    note = "DISCIPLINE  ·  PATIENCE  ·  EDGE"
+    nf = _font(13, True)
+    d.text((x1 - 30 - d.textlength(note, font=nf), ty + 6), note, font=nf, fill=INK_3)
+    for k in range(3):  # small corner dots
+        d.ellipse((x1 - 40 + k * 10, y0 + 22, x1 - 35 + k * 10, y0 + 27), fill=INK_3)
 
 
 def render_dashboard(data: DashboardData, app_name: str = "JGA Picks") -> bytes:
@@ -164,10 +183,10 @@ def render_dashboard(data: DashboardData, app_name: str = "JGA Picks") -> bytes:
         d.text((x + 20, y + 48), value, font=_font(40, True), fill=color)
         d.text((x + 22, y + 100), sub, font=_font(15), fill=INK_2)
 
-    # ---- daily profit bars + right column ------------------------------------
+    # ---- daily profit bars (full width) --------------------------------------
     y += th + 18
-    lw = 790
-    ch = 330
+    lw = W - 2 * M
+    ch = 360
     _panel(d, (M, y, M + lw, y + ch), "DAILY PROFIT")
     days = [data.today - timedelta(days=k) for k in range(data.days - 1, -1, -1)]
     per_day = {day: 0.0 for day in days}
@@ -210,88 +229,28 @@ def render_dashboard(data: DashboardData, app_name: str = "JGA Picks") -> bytes:
             if box[3] - box[1] < 2:
                 box = (box[0], zy - 1, box[2], zy + 1)
             d.rounded_rectangle(box, radius=4, fill=GOOD if v > 0 else BAD)
-        if i % 2 == 0 or len(days) <= 7:
+        if True:
             lab = f"{day:%b} {day.day}"
             d.text((cx - d.textlength(lab, font=_font(13)) / 2, gy1 + 14), lab, font=_font(13), fill=INK_2)
 
-    rx0 = M + lw + 18
-    rx1 = W - M
-    # by direction
-    _panel(d, (rx0, y, rx1, y + 196), "BY DIRECTION")
-    for j, dirn in enumerate(("UP", "DOWN")):
-        sel = [r for r in rows if r.direction == dirn]
-        p = sum(r.pos.realized_pnl or 0 for r in sel)
-        w = sum(1 for r in sel if (r.pos.realized_pnl or 0) > 0)
-        yy = y + 62 + j * 62
-        d.text((rx0 + 22, yy), f"BTC {'▲' if dirn == 'UP' else '▼'} {dirn}", font=_font(19, True), fill=INK)
-        d.text((rx0 + 22, yy + 26), f"{len(sel)} trades · {w} won", font=_font(14), fill=INK_3)
-        val = _usd(p) if sel else "—"
-        f = _font(20, True)
-        d.text((rx1 - 22 - d.textlength(val, font=f), yy + 8), val, font=f,
-               fill=(GOOD if p >= 0 else BAD) if sel else INK_3)
-    # streak
-    sy = y + 196 + 16
-    _panel(d, (rx0, sy, rx1, y + ch), "CURRENT STREAK")
-    sn, swin = _streak(rows)
-    if sn:
-        col = GOOD if swin else BAD
-        d.ellipse((rx0 + 22, sy + 56, rx0 + 70, sy + 104), outline=col, width=2)
-        d.text((rx0 + 37, sy + 63), "▲" if swin else "▼", font=_font(24, True), fill=col)
-        d.text((rx0 + 86, sy + 52), f"{'+' if swin else '−'}{sn}", font=_font(30, True), fill=col)
-        d.text((rx0 + 88, sy + 88), "WINS" if swin else "LOSSES", font=_font(15, True), fill=INK_2)
-    else:
-        d.text((rx0 + 22, sy + 64), "No trades yet", font=_font(18), fill=INK_3)
-
-    # ---- trade history + side panel ------------------------------------------
+    # ---- bottom row: today + slogan filler -----------------------------------
     y += ch + 18
-    hh = H - 92 - y
-    _panel(d, (M, y, M + lw, y + hh), "TRADE HISTORY")
-    cols = [("DATE / TIME (ET)", 22), ("MARKET", 205), ("PICK", 310), ("COST", 415), ("PRICE", 505),
-            ("P&L", 585), ("STATUS", 685)]
-    hy = y + 62
-    for name, cx in cols:
-        d.text((M + cx, hy), name, font=_font(13, True), fill=INK_3)
-    d.line((M + 1, hy + 26, M + lw - 1, hy + 26), fill=BORDER, width=1)
-    max_rows = max(0, (hh - 100) // 40)
-    recent = list(reversed(rows))[:max_rows]
-    if not recent:
-        d.text((M + 22, hy + 50), "No finished trades in this period yet.", font=_font(17), fill=INK_3)
-    for k, r in enumerate(recent):
-        p = r.pos
-        ry = hy + 40 + k * 40
-        t = (p.closed_at or p.opened_at).astimezone(ET)
-        f = _font(15)
-        d.text((M + 22, ry), f"{t:%b} {t.day}, {t:%I:%M %p}".replace(" 0", " "), font=f, fill=INK)
-        d.text((M + 205, ry), "BTC 15M", font=f, fill=INK)
-        pick = f"{'▲' if r.direction == 'UP' else '▼'} {r.direction}" if r.direction else p.side.upper()
-        d.text((M + 310, ry), pick, font=f, fill=INK)
-        d.text((M + 415, ry), _usd(p.cost + p.entry_fee, signed=False), font=f, fill=INK)
-        d.text((M + 505, ry), f"{p.entry_price:.0f}¢", font=f, fill=INK)
-        pv = p.realized_pnl or 0
-        d.text((M + 585, ry), _usd(pv), font=_font(15, True), fill=GOOD if pv > 0 else BAD if pv < 0 else INK_2)
-        lab, fg, bg = _status(p)
-        sf = _font(12, True)
-        sw = d.textlength(lab, font=sf) + 22
-        d.rounded_rectangle((M + 685, ry - 3, M + 685 + sw, ry + 21), radius=11, fill=bg, outline=fg, width=1)
-        d.text((M + 696, ry + 2), lab, font=sf, fill=fg)
-        if k < len(recent) - 1:
-            d.line((M + 1, ry + 30, M + lw - 1, ry + 30), fill=(26, 29, 34), width=1)
-
-    _panel(d, (rx0, y, rx1, y + hh), "TODAY")
+    bh = H - 92 - y
+    tw0 = 360
+    _panel(d, (M, y, M + tw0, y + bh), "TODAY")
     today_rows = [r for r in rows if _et_day(r.pos) == data.today]
     tp = sum(r.pos.realized_pnl or 0 for r in today_rows)
-    d.text((rx0 + 20, y + 58), _usd(tp), font=_font(38, True), fill=GOOD if tp >= 0 else BAD)
+    d.text((M + 20, y + 56), _usd(tp), font=_font(40, True), fill=GOOD if tp >= 0 else BAD)
     tw_ = sum(1 for r in today_rows if (r.pos.realized_pnl or 0) > 0)
-    d.text((rx0 + 22, y + 108), f"{len(today_rows)} trades · {tw_}W / {len(today_rows) - tw_}L", font=_font(16),
+    d.text((M + 22, y + 110), f"{len(today_rows)} trades · {tw_}W / {len(today_rows) - tw_}L", font=_font(16),
            fill=INK_2)
-    d.line((rx0 + 22, y + 146, rx1 - 22, y + 146), fill=BORDER, width=1)
-    d.text((rx0 + 22, y + 162), "BALANCE", font=_font(14, True), fill=INK_3)
-    d.text((rx0 + 22, y + 184), _usd(data.balance, signed=False), font=_font(26, True), fill=INK)
-    # slogan
-    sl = _font(30, True)
-    for i, word in enumerate(("GOOD", "PICKS", "MAKE", "MONEY")):
-        d.text((rx0 + 30 + i * 8, y + hh - 190 + i * 38), word, font=sl, fill=(70, 75, 84))
+    d.line((M + 22, y + 146, M + tw0 - 22, y + 146), fill=BORDER, width=1)
+    d.text((M + 22, y + 162), "BALANCE", font=_font(14, True), fill=INK_3)
+    d.text((M + 22, y + 184), _usd(data.balance, signed=False), font=_font(28, True), fill=INK)
 
+    sx0, sx1 = M + tw0 + 18, W - M
+    _panel(d, (sx0, y, sx1, y + bh))
+    _slogan(img, (sx0, y, sx1, y + bh))
     # ---- footer ---------------------------------------------------------------
     fy = H - 70
     d.line((0, fy - 8, W, fy - 8), fill=BORDER, width=1)
