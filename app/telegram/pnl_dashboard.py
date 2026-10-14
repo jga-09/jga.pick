@@ -1,4 +1,4 @@
-"""Dashboard-style P&L image (PNG): JGA Picks branding, stat tiles, daily profit bars,
+"""Dashboard-style P&L image (PNG): JGA Picks branding, stat tiles,
 today's result and slogan filler.
 
 Only real, finished trades for ONE mode (paper or live) are drawn. Nothing is projected.
@@ -18,7 +18,7 @@ from PIL import Image, ImageDraw, ImageFilter
 from app.telegram.pnl_image import ET, LOGO, _font
 from app.trading.positions import Position
 
-W, H = 1200, 1190
+W, H = 1200, 840
 M = 28  # outer margin
 
 BG = (10, 11, 13)
@@ -183,58 +183,8 @@ def render_dashboard(data: DashboardData, app_name: str = "JGA Picks") -> bytes:
         d.text((x + 20, y + 48), value, font=_font(40, True), fill=color)
         d.text((x + 22, y + 100), sub, font=_font(15), fill=INK_2)
 
-    # ---- daily profit bars (full width) --------------------------------------
-    y += th + 18
-    lw = W - 2 * M
-    ch = 360
-    _panel(d, (M, y, M + lw, y + ch), "DAILY PROFIT")
-    days = [data.today - timedelta(days=k) for k in range(data.days - 1, -1, -1)]
-    per_day = {day: 0.0 for day in days}
-    for r in rows:
-        k = _et_day(r.pos)
-        if k in per_day:
-            per_day[k] += r.pos.realized_pnl or 0.0
-    traded = {_et_day(r.pos) for r in rows}
-    gx0, gy0, gx1, gy1 = M + 84, y + 64, M + lw - 22, y + ch - 46
-    vals = list(per_day.values())
-    step = _nice_step(max(max(vals, default=0), 0) - min(min(vals, default=0), 0))
-    top = step * math.ceil(max([0.0, *vals]) / step + 0.15)
-    bot = step * math.floor(min([0.0, *vals]) / step - 0.15) if min(vals, default=0) < 0 else 0.0
-    if top <= 0:
-        top = step
-
-    def vy(v: float) -> float:
-        return gy1 - (gy1 - gy0) * (v - bot) / (top - bot)
-
-    ticks = [bot + step * k for k in range(int(round((top - bot) / step)) + 1)]
-    for v in ticks:  # recessive grid + labels
-        yy = vy(v)
-        d.line((gx0, yy, gx1, yy), fill=(30, 33, 39), width=1)
-        lab = ("−" if v < 0 else "") + _usd(abs(v), signed=False, cents=step < 1)
-        d.text((gx0 - 12 - d.textlength(lab, font=_font(14)), yy - 8), lab, font=_font(14), fill=INK_3)
-    zy = vy(0.0)
-    d.line((gx0, zy, gx1, zy), fill=INK_3, width=1)
-    if not traded:
-        msg = "No finished trades yet"
-        d.text(((gx0 + gx1 - d.textlength(msg, font=_font(18))) / 2, (gy0 + gy1) / 2 - 10), msg, font=_font(18),
-               fill=INK_3)
-    slot = (gx1 - gx0) / len(days)
-    bw = min(34, slot * 0.6)
-    for i, day in enumerate(days):
-        cx = gx0 + slot * (i + 0.5)
-        v = per_day[day]
-        if day in traded and abs(v) >= 0.005:
-            yv = vy(v)
-            box = (cx - bw / 2, min(yv, zy), cx + bw / 2, max(yv, zy))
-            if box[3] - box[1] < 2:
-                box = (box[0], zy - 1, box[2], zy + 1)
-            d.rounded_rectangle(box, radius=4, fill=GOOD if v > 0 else BAD)
-        if True:
-            lab = f"{day:%b} {day.day}"
-            d.text((cx - d.textlength(lab, font=_font(13)) / 2, gy1 + 14), lab, font=_font(13), fill=INK_2)
-
     # ---- bottom row: today + slogan filler -----------------------------------
-    y += ch + 18
+    y += th + 18
     bh = H - 92 - y
     tw0 = 360
     _panel(d, (M, y, M + tw0, y + bh), "TODAY")
