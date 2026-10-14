@@ -14,12 +14,14 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any, Protocol
 
+from app import DISPLAY_NAME
 from app.config import Settings
 from app.data.underlying import NullUnderlyingProvider, UnderlyingPriceProvider
 from app.database.repository import Repository
 from app.errors import KalshiAuthError, KalshiError, TradingError
 from app.kalshi.auth import KalshiSigner
 from app.kalshi.keystore import KeyStore
+from app.telegram.pnl_image import PnlCard, render_pnl_card
 from app.kalshi.market_data import MarketDataService, MarketInfo, MarketSnapshot
 from app.kalshi.markets import MarketDiscovery
 from app.kalshi.websocket import KalshiWebSocket
@@ -210,6 +212,26 @@ class BotRuntime:
             self.repo.add_event("KALSHI_KEY_REMOVED", "via Telegram")
         return removed
 
+    def pnl_card(self, mode: str, title: str = "TODAY'S P&L", last: Position | None = None,
+                 last_direction: str = "") -> PnlCard:
+        midnight = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        today = list(reversed(self.repo.closed_positions(mode=mode, since=midnight, limit=10_000)))
+        all_time = self.portfolio.stats(mode).realized
+        return PnlCard(title, mode, today, self.portfolio.balance(mode), all_time, last, last_direction)
+
+    async def send_pnl_image(self, kind: str, key: str, caption: str, mode: str, last: Position | None = None,
+                             last_direction: str = "", title: str = "TODAY'S P&L") -> bool:
+        """P&L image with ``caption``. Returns False when disabled or failed (caller sends text instead)."""
+        if not self.settings.pnl_image or self.notifier is None or not hasattr(self.notifier, "photo"):
+            return False
+        try:
+            card = self.pnl_card(mode, title, last, last_direction)
+            png = await asyncio.to_thread(render_pnl_card, card, DISPLAY_NAME)
+            return await self.notifier.photo(kind, key, png, caption)
+        except Exception:  # noqa: BLE001 - an image problem must never block trade messages
+            log.exception("PNL_IMAGE_FAILED kind=%s", kind)
+            return False
+
     async def notify(self, kind: str, key: str, text: str, buttons: list | None = None) -> None:
         if self.notifier is None:
             return
@@ -255,6 +277,10 @@ class BotRuntime:
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
         self.repo.add_event("BOT_STOPPED")
+        mode = self.state.mode
+        await self.send_pnl_image("session_summary", f"summary:{utcnow():%Y%m%d%H%M}",
+                                  f"🏁 <b>Bot stopped</b> · today's results ({'real money' if mode == 'live' else 'paper'})",
+                                  mode, title="SESSION SUMMARY · TODAY")
 
     def should_auto_start(self) -> tuple[bool, str]:
         if not self.settings.auto_start:
@@ -618,7 +644,9 @@ class BotRuntime:
     async def _after_close(self, pos: Position) -> None:
         self._analyze_close(pos)
         direction, _why, summary = self._card_meta(pos, with_summary=True)
-        await self.notify("trade_closed", f"close:{pos.id}", messages.trade_closed_alert(pos, direction, summary))
+        text = messages.trade_closed_alert(pos, direction, summary)
+        if not await self.send_pnl_image("trade_closed", f"close:{pos.id}", text, pos.mode, pos, direction):
+            await self.notify("trade_closed", f"close:{pos.id}", text)
         limit = self.settings.large_loss_alert_usd
         if limit > 0 and (pos.realized_pnl or 0) <= -limit:
             await self.notify("large_loss", f"loss:{pos.id}", messages.large_loss_alert(pos))

@@ -204,5 +204,24 @@ class AlertManager:
                 self.dashboard.track(chat_id, msg.message_id)
 
 
+    async def photo(self, kind: str, key: str, png: bytes, caption: str, buttons: list | None = None) -> bool:
+        """Send an image with an HTML caption. Returns False if it could not be sent (caller falls back to text)."""
+        if not self.should_send(kind, key):
+            return True
+        ok = False
+        for chat_id in self.admin_ids:
+            try:
+                msg = await self.bot.send_photo(chat_id=chat_id, photo=png, caption=caption[:1024],
+                                                parse_mode=ParseMode.HTML,
+                                                reply_markup=to_markup(Screen(caption, buttons or [])))
+            except (Forbidden, BadRequest, TimedOut, NetworkError) as exc:
+                log.warning("TELEGRAM_PHOTO_FAILED chat=%s error=%s", chat_id, exc)
+                continue
+            ok = True
+            self.dashboard.chats.setdefault(chat_id, _new_view(chat_id))
+            self.dashboard.track(chat_id, msg.message_id)
+        return ok
+
+
 def _new_view(chat_id: int) -> ChatView:
     return ChatView(user_id=chat_id, refreshable=False)
