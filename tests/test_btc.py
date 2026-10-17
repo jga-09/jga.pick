@@ -581,3 +581,26 @@ async def test_signal_alerts_on_still_sends_flips(runtime, monkeypatch):
     monkeypatch.setattr("app.runtime.messages.flip_alert", lambda flip: "flip!")
     await runtime.process_snapshot(quote_snapshot(make_info()))
     assert "flip" in sent
+
+
+def test_seed_calibration_from_history(tmp_path, monkeypatch):
+    import importlib.util
+
+    from app.config import Settings
+    from app.database.db import Database
+    from app.database.repository import Repository
+    from app.research.btc_synthetic import generate
+
+    generate(tmp_path / "cache", days=1, mode="efficient")
+    db = tmp_path / "t.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db}")
+    spec = importlib.util.spec_from_file_location("seed", "scripts/btc_seed_calibration.py")
+    seed = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(seed)
+    monkeypatch.setattr("sys.argv", ["seed", "--cache", str(tmp_path / "cache")])
+    assert seed.main() == 0
+    repo = Repository(Database(Settings(_env_file=None).database_url))
+    obs = repo.observations(source="btc")
+    assert obs and all(o.features.get("backfill") == 1.0 and o.outcome in ("yes", "no") for o in obs)
+    n = len(obs)
+    assert seed.main() == 0 and len(repo.observations(source="btc")) == n  # idempotent

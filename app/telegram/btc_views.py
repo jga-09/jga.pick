@@ -463,6 +463,11 @@ def analytics(rt: BotRuntime) -> Screen:
     cal = rt.calibration
     lines = ["📈 <b>RESULTS</b>", "", *blocks, "<b>🎯 Are the bot's odds accurate?</b>"]
     lines += _accuracy_lines(rt, cal.state if cal else None)
+    obs = rt.repo.observations(source="btc")
+    hist = {o.ticker for o in obs if o.features.get("backfill")}
+    if hist:
+        live = {o.ticker for o in obs} - hist
+        lines += ["", f"📚 {len(hist)} markets from downloaded history · {len(live)} live"]
     rep = load_report(Path(rt.settings.btc_backtest_report))
     lines += ["", "<b>🧪 Backtest</b>", _backtest_one_liner(rep)]
     buttons = grid2([("🎯 Odds accuracy", "bcal"), ("🧪 Backtest", "bt"), ("📜 History", "hist:all"),
