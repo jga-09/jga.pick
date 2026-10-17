@@ -465,7 +465,9 @@ class _Obs:
 
 def walk_forward(ds: Dataset, name: str, select: Selector, grid: Iterable[float], costs: SimCosts,
                  train_days: int = 3, val_days: int = 1, min_train_trades: int = 15,
-                 require_calibration: bool = False, cal_min_markets: int = 30, cal_tol: float = 0.05) -> WFResult:
+                 require_calibration: bool = False, cal_min_markets: int = 30, cal_tol: float = 0.05,
+                 sim: Callable[..., list[Trade]] | None = None) -> WFResult:
+    simulate_ = sim or simulate
     by_day = ds.by_day()
     days = ds.days
     trades: list[Trade] = []
@@ -480,18 +482,18 @@ def walk_forward(ds: Dataset, name: str, select: Selector, grid: Iterable[float]
         train = {k: v for d in train_d for k, v in by_day[d].items()}
         best, best_ev = None, None
         for g in grid:
-            tr = simulate(train, select, g, costs, cal, name)
+            tr = simulate_(train, select, g, costs, cal, name)
             if len(tr) >= min_train_trades:
                 ev = sum(t.net for t in tr) / len(tr)
                 if ev > 0 and (best_ev is None or ev > best_ev):
                     best, best_ev = g, ev
         if best is not None:
-            val = simulate({k: v for d in val_d for k, v in by_day[d].items()}, select, best, costs, cal, name)
+            val = simulate_({k: v for d in val_d for k, v in by_day[d].items()}, select, best, costs, cal, name)
             if val and sum(t.net for t in val) <= 0:
                 best = None  # profitable in training but not on the validation days: sit out
         chosen.append((test_d, best))
         if best is not None:
-            trades += simulate(by_day[test_d], select, best, costs, cal, name)
+            trades += simulate_(by_day[test_d], select, best, costs, cal, name)
     return WFResult(name, trades, chosen)
 
 

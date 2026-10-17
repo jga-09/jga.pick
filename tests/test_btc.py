@@ -604,3 +604,21 @@ def test_seed_calibration_from_history(tmp_path, monkeypatch):
     assert obs and all(o.features.get("backfill") == 1.0 and o.outcome in ("yes", "no") for o in obs)
     n = len(obs)
     assert seed.main() == 0 and len(repo.observations(source="btc")) == n  # idempotent
+
+
+def test_maker_fills_only_when_ask_reaches_bid(tmp_path):
+    from app.research.btc_backtest import SimCosts, load_dataset
+    from app.research.btc_maker import FillStats, MakerCosts, make_simulator, run_maker, v_maker_mom_model
+    from app.research.btc_synthetic import generate
+
+    generate(tmp_path, days=5, mode="lagged")
+    ds = load_dataset(tmp_path)
+    mc, stats = MakerCosts(offset_cents=2.0), FillStats()
+    trades = make_simulator(mc, stats)(ds.markets, v_maker_mom_model(mc), 1.0, SimCosts())
+    assert trades and stats.attempts >= stats.fills == len(trades)
+    for t in trades:
+        ask_then = t.step.yes_ask if t.side == "yes" else t.step.no_ask
+        assert ask_then is not None and ask_then <= t.ask  # someone offered at (or below) our bid
+        assert t.slippage == 0.0
+    rep = run_maker(ds, offsets=(2.0,))
+    assert "taker: momentum+probability model" in rep["variants"] and rep["verdict"]
