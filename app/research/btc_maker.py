@@ -154,6 +154,7 @@ class MakerVariant:
     name: str
     trades: list[Trade]
     stats: FillStats = field(default_factory=FillStats)
+    days_traded: int = 0  # out-of-sample days where a profitable setting was found
 
 
 def run_maker(ds: Dataset, costs: SimCosts | None = None, train_days: int = 3, val_days: int = 1,
@@ -163,7 +164,7 @@ def run_maker(ds: Dataset, costs: SimCosts | None = None, train_days: int = 3, v
     out_vars: list[MakerVariant] = []
     ref = walk_forward(ds, "taker: momentum+probability model", v_mom_model(costs), MOM_GRID, costs,
                        train_days, val_days, sim=simulate)
-    out_vars.append(MakerVariant(ref.name, ref.trades))
+    out_vars.append(MakerVariant(ref.name, ref.trades, days_traded=sum(1 for _, g in ref.chosen if g is not None)))
     for off in offsets:
         mc = MakerCosts(off, max_wait_min, maker_fee_rate)
         for label, sel, grid in (("momentum+probability model", v_maker_mom_model(mc), MOM_GRID),
@@ -171,21 +172,27 @@ def run_maker(ds: Dataset, costs: SimCosts | None = None, train_days: int = 3, v
             stats = FillStats()
             name = f"maker -{off:g}c: {label}"
             wf = walk_forward(ds, name, sel, grid, costs, train_days, val_days, sim=make_simulator(mc, stats))
-            out_vars.append(MakerVariant(name, wf.trades, stats))
+            out_vars.append(MakerVariant(name, wf.trades, stats, sum(1 for _, g in wf.chosen if g is not None)))
     variants = {}
     for v in out_vars:
         m = metrics(v.trades, capital)
         m["fill_rate"] = v.stats.fill_rate
         m["orders"] = v.stats.attempts
         m["missed_winners"] = v.stats.missed_winners
+        m["days_traded"] = v.days_traded
         variants[v.name] = m
     best_name, best = None, None
     for name, m in variants.items():
         if name.startswith("maker") and m["trades"] >= 30 and (best is None or
                                                                (m["avg_profit_per_trade"] or -1) > (best["avg_profit_per_trade"] or -1)):
             best_name, best = name, m
-    if best is None:
-        verdict = "INSUFFICIENT DATA: no maker variant reached 30 out-of-sample fills. Download more days."
+    makers = {k: m for k, m in variants.items() if k.startswith("maker")}
+    if best is None and all(m["days_traded"] == 0 for m in makers.values()):
+        verdict = ("NO EVIDENCE OF EDGE: posting bids was never profitable on earlier days, so no maker version "
+                   "traded out of sample. Do not trade this live.")
+    elif best is None:
+        verdict = ("INSUFFICIENT DATA: some maker versions traded out of sample but none reached 30 fills, "
+                   "so the result could be luck. Download more days.")
     elif best.get("ev_95") and best["ev_95"][0] > 0:
         verdict = f"POSITIVE: '{best_name}' is profitable out of sample with the whole 95% range above zero. Next: paper-trade it live."
     elif (best["avg_profit_per_trade"] or 0) > 0:
@@ -215,7 +222,8 @@ def format_maker_report(r: dict[str, Any]) -> str:
     for name, m in r["variants"].items():
         if not m["trades"]:
             fr = f"  (orders {m['orders']}, fill rate {m['fill_rate']:.0%})" if m.get("fill_rate") is not None else ""
-            lines.append(f"{name:<46}    0 fills{fr}")
+            lines.append(f"{name:<46}    0 fills (never profitable on earlier days){fr}" if not m.get("days_traded")
+                         else f"{name:<46}    0 fills{fr}")
             continue
         pf = m["profit_factor"]
         pf_s = "inf" if pf == math.inf else ("n/a" if pf is None else f"{pf:.2f}")
