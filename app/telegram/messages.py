@@ -823,6 +823,28 @@ def trade_closed_alert(pos: Position, direction: str = "", summary: str = "") ->
     return "\n".join([f"{head}  ·  {_dir(pos, direction)}", CARD_LINE, *body, "", _footer(pos)])
 
 
+def exit_suggestion(pos: Position, direction: str, reason: str, bid: float) -> str:
+    est = pos.unrealized_pnl(bid)
+    return "\n".join([f"⚠️ <b>CASH OUT?</b>  ·  {_dir(pos, direction)}", CARD_LINE,
+                      f"{_sh(pos.contracts, True)} @ {pos.entry_price:.0f}¢  →  bid {bid:.0f}¢",
+                      f"Selling now: <b>{_signed(est)}</b>",
+                      f"<i>{escape(reason, quote=False)}</i>", "",
+                      "Real money: nothing is sold unless you tap Sell.", _footer(pos)])
+
+
+def exit_check(pos: Position, direction: str, result: str, hold: float, saved: float, st: dict) -> str:
+    verdict = (f"✅ Cashing out saved <b>{_signed(saved)}</b>" if saved > 0
+               else f"❌ Cashing out cost <b>{_signed(saved)}</b>" if saved < 0 else "➖ Same either way")
+    total = st.get("saved", 0.0)
+    return "\n".join([f"🔎 <b>EARLY EXIT CHECK</b>  ·  {_dir(pos, direction)}", CARD_LINE,
+                      f"Market settled {result.upper()}",
+                      f"Holding would have been: {_signed(hold)}",
+                      f"Cashing out got: {_signed(pos.realized_pnl or 0)}",
+                      verdict, "",
+                      f"<i>All early exits so far: {int(st.get('exits', 0))} · net {_signed(total)} "
+                      f"({int(st.get('helped', 0))} helped, {int(st.get('hurt', 0))} hurt)</i>"])
+
+
 def large_loss_alert(pos: Position) -> str:
     return f"🔻 <b>LARGE LOSS</b>\n{escape(pos.label)}: {money(pos.realized_pnl)}"
 

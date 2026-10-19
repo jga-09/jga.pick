@@ -114,6 +114,15 @@ class Settings(BaseSettings):
     # false = quiet: no "signal flip" messages, and no "trade found" alerts while auto trade is on
     # (the trade card is sent when a trade is actually taken). Set true to get every signal alert.
     signal_alerts: bool = False
+    # --- Early exit ("cash out") when the trade turns against you ------------
+    # Paper: sells automatically. Live: sends a Sell button (every real order needs your tap).
+    early_exit: bool = True
+    early_exit_flip_confidence: int = Field(60, ge=50, le=100)  # opposite signal at least this confident
+    early_exit_btc_p_side: float = Field(0.40, gt=0, lt=0.5)  # BTC engine: our side's odds fell below this
+    early_exit_confirm_ticks: int = Field(2, ge=1, le=10)  # must hold for N checks in a row (no noise exits)
+    early_exit_min_bid_cents: float = Field(5.0, ge=1, le=50)  # not worth selling below this
+    early_exit_min_t_left_sec: float = Field(45.0, ge=0)
+    early_exit_stop_loss_pct: float = Field(0.0, ge=0, le=95)  # 0 = off; e.g. 50 = sell if value halves
     # Send a P&L image after every finished trade and when the bot is stopped.
     pnl_image: bool = True
     strong_signal_alert_min_confidence: int = Field(80, ge=0, le=100)

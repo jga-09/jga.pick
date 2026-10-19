@@ -169,7 +169,8 @@ def _plain(text: str) -> str:
 class AlertManager:
     """Sends alerts to admin chats with per-key cooldowns and a global rate cap."""
 
-    NO_COOLDOWN = {"trade_opened", "trade_closed", "large_loss", "daily_limit", "emergency"}
+    NO_COOLDOWN = {"trade_opened", "trade_closed", "large_loss", "daily_limit", "emergency", "exit_suggest",
+                   "exit_check"}
 
     def __init__(self, bot: Any, dashboard: DashboardManager, admin_ids: frozenset[int],
                  cooldown_sec: float, max_per_minute: int = 12) -> None:

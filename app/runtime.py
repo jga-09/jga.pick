@@ -7,7 +7,9 @@ the Kalshi client or the database directly.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+from pathlib import Path
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
@@ -115,6 +117,9 @@ class BotRuntime:
 
         self._research = ResearchCache()
         self._strong: dict[str, str] = {}  # ticker -> direction currently alerted as strong
+        self._exit_ticks: dict[int, int] = {}  # position id -> consecutive checks saying "exit"
+        self._exit_suggested: set[int] = set()  # live positions already offered a Sell button
+        self._early_exits: dict[str, list[Position]] = {}  # ticker -> positions cashed out early (to score later)
         self.risk = RiskManager(PositionSizer(settings.fee_rate), settings.stale_data_sec,
                                 settings.order_price_tolerance_cents, ev_gate=settings.ev_gate,
                                 strategy_mode=settings.strategy_mode)
@@ -775,9 +780,103 @@ class BotRuntime:
         elif not strong and (sig.grade not in ("A+", "A")
                              or sig.confidence < self.settings.strong_signal_alert_min_confidence - 5):
             self._strong.pop(snap.ticker, None)  # hysteresis: re-arm only after it clearly weakens
+        if self.settings.early_exit:
+            await self._manage_exits(sig, snap)
         if self.state.auto_trade and decision.approved:
             await self._auto_trade(sig, snap, decision)
         return sig
+
+    # ------------------------------------------------------------ early exits
+    def exit_reason(self, pos: Position, sig: SignalResult, snap: MarketSnapshot) -> str | None:
+        """Why the open position should be cashed out now, or None. Uses only current data."""
+        s = self.settings
+        bid = snap.exit_price(pos.side)
+        if s.early_exit_stop_loss_pct > 0 and bid is not None and \
+                bid <= pos.entry_price * (1 - s.early_exit_stop_loss_pct / 100):
+            return f"stop-loss: value down {s.early_exit_stop_loss_pct:g}%+"
+        b = sig.btc
+        if b is not None and b.p_yes is not None:
+            p_side = b.p_yes if pos.side == "yes" else 1 - b.p_yes
+            if p_side < s.early_exit_btc_p_side:
+                return f"bot's odds for this side fell to {p_side:.0%}"
+            return None
+        direction = self._card_meta(pos)[0]
+        lean = sig.leaning.value
+        if lean in ("UP", "DOWN") and lean != direction and sig.confidence >= s.early_exit_flip_confidence:
+            return f"signal flipped to {lean} ({sig.confidence}%)"
+        return None
+
+    async def _manage_exits(self, sig: SignalResult, snap: MarketSnapshot) -> None:
+        s = self.settings
+        for pos in [p for p in self.portfolio.open_positions() if p.ticker == snap.ticker and p.id is not None]:
+            reason = self.exit_reason(pos, sig, snap)
+            if reason is None:
+                self._exit_ticks.pop(pos.id, None)
+                continue
+            n = self._exit_ticks[pos.id] = self._exit_ticks.get(pos.id, 0) + 1
+            bid = snap.exit_price(pos.side)
+            if (n < s.early_exit_confirm_ticks or bid is None or bid < s.early_exit_min_bid_cents
+                    or snap.time_remaining() < s.early_exit_min_t_left_sec):
+                continue
+            if pos.mode == "live":
+                if pos.id not in self._exit_suggested:  # never sell real money without a tap
+                    self._exit_suggested.add(pos.id)
+                    await self.notify("exit_suggest", f"exit:{pos.id}",
+                                      messages.exit_suggestion(pos, self._card_meta(pos)[0], reason, bid),
+                                      [[("💰 Sell now", f"pcl:{pos.id}"), ("✋ Keep", "home")]])
+                continue
+            try:
+                await self.executor.close(pos, snap, confirmed=True, reason=f"early exit: {reason}")
+            except TradingError as exc:
+                log_event(log, "EARLY_EXIT_FAILED", logging.WARNING, ticker=pos.ticker, error=exc)
+                continue
+            self._exit_ticks.pop(pos.id, None)
+            self._early_exits.setdefault(pos.ticker, []).append(pos)
+            log_event(log, "EARLY_EXIT", ticker=pos.ticker, side=pos.side, reason=reason, pnl=pos.realized_pnl)
+            await self._after_close(pos)
+
+    @property
+    def _exit_stats_path(self) -> Path:
+        return self.settings.kalshi_key_dir.parent / "early_exit_stats.json"
+
+    def early_exit_stats(self) -> dict[str, float]:
+        try:
+            return json.loads(self._exit_stats_path.read_text())
+        except (OSError, ValueError):
+            return {"exits": 0, "saved": 0.0, "helped": 0, "hurt": 0}
+
+    async def score_early_exits(self, now: datetime | None = None) -> int:
+        """After the market settles, compare each cash-out with simply holding (real result only)."""
+        now = now or utcnow()
+        scored = 0
+        for ticker, plist in list(self._early_exits.items()):
+            close = plist[0].close_time
+            if close is None or now < close + timedelta(seconds=5):
+                continue
+            try:
+                raw = await self.client.get_market(ticker)
+            except KalshiError:
+                continue
+            result = str(raw.get("result") or "")
+            if result not in ("yes", "no"):
+                continue
+            del self._early_exits[ticker]
+            st = self.early_exit_stats()
+            for pos in plist:
+                hold = round(pos.contracts * (100 if result == pos.side else 0) / 100 - pos.cost - pos.entry_fee, 2)
+                saved = round((pos.realized_pnl or 0) - hold, 2)
+                st["exits"] += 1
+                st["saved"] = round(st["saved"] + saved, 2)
+                st["helped" if saved > 0 else "hurt"] += 1 if saved != 0 else 0
+                scored += 1
+                await self.notify("exit_check", f"exitcheck:{pos.id}",
+                                  messages.exit_check(pos, self._card_meta(pos)[0], result, hold, saved, st))
+            try:
+                self._exit_stats_path.parent.mkdir(parents=True, exist_ok=True)
+                self._exit_stats_path.write_text(json.dumps(st))
+            except OSError:
+                log.warning("EARLY_EXIT_STATS_SAVE_FAILED")
+        return scored
 
     async def _auto_trade(self, sig: SignalResult, snap: MarketSnapshot, decision: RiskDecision) -> None:
         if self.state.mode == "live" and (self.btc_mode or not self.settings.live_autotrade_allowed):
@@ -829,6 +928,7 @@ class BotRuntime:
                                      f"settled {result.upper()}", action="SETTLE")
             settled.append(pos)
             await self._after_close(pos)
+        await self.score_early_exits(now)
         return settled
 
     async def _maintenance_loop(self) -> None:
