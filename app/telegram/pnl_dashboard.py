@@ -48,6 +48,7 @@ class DashboardData:
     days: int = 14
     title: str = "P&L OVERVIEW"
     today: date = field(default_factory=lambda: datetime.now(ET).date())
+    markets: str = "BTC"  # e.g. "BTC/ETH/SOL"
 
 
 def _usd(v: float, signed: bool = True, cents: bool = True) -> str:
@@ -95,7 +96,7 @@ def _header(img: Image.Image, d: ImageDraw.ImageDraw, data: DashboardData) -> No
         d.text((M + 10, 70), "JGA PICKS", font=_font(48, True), fill=INK)
     d.line((300, 40, 300, 160), fill=BORDER, width=2)
     d.text((332, 70), "R E S E A R C H    /    A N A L Y Z E    /    P R O F I T", font=_font(18, True), fill=INK)
-    d.text((332, 104), "Kalshi BTC 15M  ·  Real Data  ·  Smarter Trades", font=_font(18), fill=INK_2)
+    d.text((332, 104), f"Kalshi {data.markets} 15M  ·  Real Data  ·  Smarter Trades", font=_font(18), fill=INK_2)
     pill = "PAPER TRADING" if data.mode == "paper" else "REAL MONEY"
     pf = _font(18, True)
     pw = d.textlength(pill, font=pf) + 36
@@ -209,7 +210,7 @@ def render_dashboard(data: DashboardData, app_name: str = "JGA Picks") -> bytes:
         logo = logo.resize((80, int(logo.height * 80 / logo.width)), Image.LANCZOS)
         img.paste(logo, (M, fy + 4), logo)
     ff = _font(13, True)
-    d.text((140, fy + 22), "K A L S H I    /    B T C   1 5 M    /    "
+    d.text((140, fy + 22), "K A L S H I    /    " + " ".join(f"{data.markets} 15M") + "    /    "
            + ("P A P E R" if data.mode == "paper" else "R E A L   M O N E Y"), font=ff, fill=INK_3)
     tag = "D I S C I P L I N E    C R E A T E S    F R E E D O M"
     d.text((W - M - d.textlength(tag, font=ff), fy + 22), tag, font=ff, fill=INK_3)

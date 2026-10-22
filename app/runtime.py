@@ -239,7 +239,8 @@ class BotRuntime:
             ctx = self.repo.trade_context(pos.id) if pos.id is not None else None
             trades.append(TradeRow(pos, ((ctx or {}).get("entry") or {}).get("direction", "")))
         prev_pnl = sum(p.realized_pnl or 0 for p in prev) if prev else None
-        return DashboardData(mode, trades, prev_pnl, self.portfolio.balance(mode), days, title, today)
+        return DashboardData(mode, trades, prev_pnl, self.portfolio.balance(mode), days, title, today,
+                             "/".join(self.settings.asset_list) or "BTC")
 
     async def send_pnl_image(self, kind: str, key: str, caption: str, mode: str, last: Position | None = None,
                              last_direction: str = "", title: str = "TODAY'S P&L") -> bool:
