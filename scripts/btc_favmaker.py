@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.research.btc_backtest import load_dataset  # noqa: E402
-from app.research.btc_favmaker import format_favmaker, load_trades, run_favmaker  # noqa: E402
+from app.research.btc_favmaker import compute_fills, format_favmaker, run_favmaker  # noqa: E402
 from app.strategy.btc_model import ModelConfig  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,11 +32,13 @@ def main() -> int:
     if not cache.exists() or not any(cache.glob("KXBTC*.json.gz")):
         print(f"No BTC market history in {cache}.\nRun first:  python scripts/replay.py --days 30")
         return 1
-    print("Loading cached BTC markets and trade tapes...")
+    print("Loading cached BTC markets...", flush=True)
     ds = load_dataset(cache, ModelConfig())
-    trades = load_trades(cache)
+    print(f"Checking fills against the real trade tape, one market at a time ({len(ds.markets)} markets)...",
+          flush=True)
+    fills, with_tape = compute_fills(cache, ds)
     try:
-        rep = run_favmaker(ds, trades, args.holdout_days)
+        rep = run_favmaker(ds, fills, args.holdout_days, with_tape)
     except ValueError as exc:
         print(f"Not enough data: {exc}")
         return 1

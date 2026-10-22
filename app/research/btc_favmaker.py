@@ -34,17 +34,41 @@ from app.research.replay import _record_trades
 VARIANTS = ((60.0, 80.0), (70.0, 90.0), (80.0, 95.0))
 
 
-def load_trades(cache: Path) -> dict[str, list[TradePrint]]:
-    out: dict[str, list[TradePrint]] = {}
+Row = tuple[float, float, str]  # (unix time, YES price in cents, taker side "yes"/"no")
+
+
+def _rows(rec: dict[str, Any]) -> list[Row]:
+    """Light-weight trade rows for one cached market (no per-trade objects: tapes can be huge)."""
+    if rec.get("v") == 2:
+        return sorted((float(r[0]), float(r[1]), "yes" if r[3] == "y" else "no") for r in rec.get("trades") or [])
+    return sorted((t.ts.timestamp(), t.yes_price, t.taker_side) for t in _record_trades(rec))
+
+
+def compute_fills(cache: Path, ds: Dataset) -> tuple[dict[str, dict[tuple[float, float, str], bool]], int]:
+    """Stream the cache ONE market at a time and decide every variant's fill for it.
+
+    Returns ({ticker: {(lo, hi, rule): filled}}, markets with a trade tape). Memory stays flat."""
+    out: dict[str, dict[tuple[float, float, str], bool]] = {}
+    with_tape = 0
     for f in sorted(cache.glob("KXBTC*.json.gz")):
         try:
             rec = json.loads(gzip.decompress(f.read_bytes()))
         except (OSError, ValueError):
             continue
-        t = (rec.get("market") or {}).get("ticker")
-        if t:
-            out[t] = sorted(_record_trades(rec), key=lambda x: x.ts)
-    return out
+        ticker = (rec.get("market") or {}).get("ticker")
+        steps = ds.markets.get(ticker or "")
+        if not steps:
+            continue
+        rows = _rows(rec)
+        del rec
+        with_tape += bool(rows)
+        res: dict[tuple[float, float, str], bool] = {}
+        for lo, hi in VARIANTS:
+            o = place(steps, lo, hi)
+            for rule in ("through", "touch"):
+                res[(lo, hi, rule)] = o is not None and filled_rows(o, rows, rule)
+        out[ticker] = res
+    return out, with_tape
 
 
 @dataclass(frozen=True)
@@ -66,33 +90,38 @@ def place(steps: Sequence[Step], lo: float, hi: float, min_t_left: float = 120.0
     return None
 
 
-def filled(order: Order, trades: Sequence[TradePrint], rule: str, cancel_before: float = 60.0) -> bool:
-    start = order.step.ts
-    end = order.step.close - timedelta(seconds=cancel_before)
-    for t in trades:
-        if t.ts <= start:
+def filled_rows(order: Order, rows: Sequence[Row], rule: str, cancel_before: float = 60.0) -> bool:
+    start = order.step.ts.timestamp()
+    end = (order.step.close - timedelta(seconds=cancel_before)).timestamp()
+    for ts, yes_price, taker in rows:
+        if ts <= start:
             continue
-        if t.ts > end:
+        if ts > end:
             break
         if order.side == "yes":
-            if t.yes_price < order.price or (rule == "touch" and t.yes_price <= order.price and t.taker_side == "no"):
+            if yes_price < order.price or (rule == "touch" and yes_price <= order.price and taker == "no"):
                 return True
         else:
-            no_price = 100 - t.yes_price
-            if no_price < order.price or (rule == "touch" and no_price <= order.price and t.taker_side == "yes"):
+            no_price = 100 - yes_price
+            if no_price < order.price or (rule == "touch" and no_price <= order.price and taker == "yes"):
                 return True
     return False
 
 
-def run_variant(markets: dict[str, list[Step]], trades: dict[str, list[TradePrint]], lo: float, hi: float,
-                rule: str) -> tuple[list[ATrade], int]:
+def filled(order: Order, trades: Sequence[TradePrint], rule: str, cancel_before: float = 60.0) -> bool:
+    rows = sorted((t.ts.timestamp(), t.yes_price, t.taker_side) for t in trades)
+    return filled_rows(order, rows, rule, cancel_before)
+
+
+def run_variant(markets: dict[str, list[Step]], fills: dict[str, dict[tuple[float, float, str], bool]],
+                lo: float, hi: float, rule: str) -> tuple[list[ATrade], int]:
     out, orders = [], 0
     for ticker, steps in markets.items():
         o = place(steps, lo, hi)
         if o is None:
             continue
         orders += 1
-        if not filled(o, trades.get(ticker, []), rule):
+        if not fills.get(ticker, {}).get((lo, hi, rule)):
             continue
         won = o.step.outcome == o.side
         out.append(ATrade(ticker, o.step.day, o.side, o.price, 0.0, 0.0, 100.0 if won else 0.0, won,
@@ -100,7 +129,8 @@ def run_variant(markets: dict[str, list[Step]], trades: dict[str, list[TradePrin
     return out, orders
 
 
-def run_favmaker(ds: Dataset, trades: dict[str, list[TradePrint]], holdout_days: int = 7) -> dict[str, Any]:
+def run_favmaker(ds: Dataset, fills: dict[str, dict[tuple[float, float, str], bool]], holdout_days: int = 7,
+                 with_tape: int = 0) -> dict[str, Any]:
     days = ds.days
     if len(days) <= holdout_days + 5:
         raise ValueError(f"need more than {holdout_days + 5} days of data (have {len(days)})")
@@ -108,12 +138,11 @@ def run_favmaker(ds: Dataset, trades: dict[str, list[TradePrint]], holdout_days:
     dev_days, hold_days = days[:-holdout_days], days[-holdout_days:]
     dev = {k: v for d in dev_days for k, v in by_day[d].items()}
     hold = {k: v for d in hold_days for k, v in by_day[d].items()}
-    with_tape = sum(1 for t in ds.markets if trades.get(t))
     rows = []
     for lo, hi in VARIANTS:
         for rule in ("through", "touch"):
-            td, od = run_variant(dev, trades, lo, hi, rule)
-            th, oh = run_variant(hold, trades, lo, hi, rule)
+            td, od = run_variant(dev, fills, lo, hi, rule)
+            th, oh = run_variant(hold, fills, lo, hi, rule)
             sd, sh = summarize(td), summarize(th)
             decision = None
             if rule == "through":

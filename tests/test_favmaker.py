@@ -45,7 +45,32 @@ def test_fill_rules(ds):
 
 
 def test_report_runs_and_needs_samples(ds):
-    rep = run_favmaker(ds, {}, holdout_days=3)  # no trade tape -> nothing fills -> not supported
+    rep = run_favmaker(ds, {}, holdout_days=3)  # no fills -> not supported
     assert rep["verdict"].startswith("NOT SUPPORTED")
     assert all(r["dev"]["trades"] == 0 for r in rep["rows"])
     assert "VERDICT" in format_favmaker(rep)
+
+
+def test_streaming_fills_from_cache(tmp_path):
+    import gzip
+    import json
+
+    from app.research.btc_favmaker import VARIANTS, compute_fills
+
+    generate(tmp_path, days=9, mode="efficient")
+    ds6 = load_dataset(tmp_path)
+    # add a trade tape to every cached market: one YES trade at 1c and one at 99c, 5 min after open
+    for f in tmp_path.glob("KXBTC*.json.gz"):
+        rec = json.loads(gzip.decompress(f.read_bytes()))
+        steps = ds6.markets.get(rec["market"]["ticker"])
+        if not steps:
+            continue
+        t = steps[0].ts.timestamp() + 300
+        rec["trades"] = [[t, 1.0, 1, "n"], [t + 1, 99.0, 1, "y"]]
+        f.write_bytes(gzip.compress(json.dumps(rec).encode()))
+    fills, with_tape = compute_fills(tmp_path, ds6)
+    assert with_tape > 0
+    placed = [(t, v) for t, d in fills.items() for v, ok in d.items() if ok]
+    assert placed  # extreme prints trade through every bid placed before them
+    rep = run_favmaker(ds6, fills, holdout_days=2, with_tape=with_tape)
+    assert {r["variant"] for r in rep["rows"]} == {f"favourite {lo:.0f}-{hi:.0f}c" for lo, hi in VARIANTS}
