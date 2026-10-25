@@ -122,8 +122,16 @@ def window(bars: Sequence[MinuteBar], keys: Sequence[datetime], as_of: datetime,
 
 
 def build_market_steps(record: dict[str, Any], bars: Sequence[MinuteBar], keys: Sequence[datetime],
-                       cfg: ModelConfig, avg_window_sec: int) -> tuple[list[Step], str | None, bool]:
-    """(steps, skip reason, rules missing) for one cached settled market."""
+                       cfg: ModelConfig, avg_window_sec: int,
+                       spot_source: str = "coinbase") -> tuple[list[Step], str | None, bool]:
+    """(steps, skip reason, rules missing) for one cached settled market.
+
+    spot_source="index" takes the spot from the cached settlement-index candles (record["index"],
+    [[minute END unix seconds, close], ...]) - only candles complete at that minute, never later ones.
+    Volatility and momentum still come from the Coinbase bars."""
+    index = {int(r[0]): float(r[1]) for r in record.get("index") or []} if spot_source == "index" else None
+    if spot_source == "index" and not index:
+        return [], "no settlement-index data", False
     m = record.get("market") or {}
     if m.get("result") not in ("yes", "no"):
         return [], "not settled yes/no", False
@@ -149,7 +157,10 @@ def build_market_steps(record: dict[str, Any], bars: Sequence[MinuteBar], keys: 
             continue
         hist = window(bars, keys, c.ts)
         last = hist[-1] if hist else None
-        spot = last.close if last is not None and (c.ts - last.ts).total_seconds() <= 120 else None
+        if index is not None:
+            spot = index.get(int(c.ts.timestamp()))
+        else:
+            spot = last.close if last is not None and (c.ts - last.ts).total_seconds() <= 120 else None
         feats = compute_btc_features(hist, spot, c.ts, cfg, terms.threshold, t_left, terms.averaging_window_sec)
         est = estimate_probability(terms, spot, hist, c.ts, t_left, cfg)
         prior = [v for t, v in mids if t <= c.ts - timedelta(seconds=240)]
@@ -160,7 +171,8 @@ def build_market_steps(record: dict[str, Any], bars: Sequence[MinuteBar], keys: 
     return steps, None if steps else "no usable minutes", rules_missing
 
 
-def load_dataset(cache: Path, cfg: ModelConfig | None = None, avg_window_sec: int = 60) -> Dataset:
+def load_dataset(cache: Path, cfg: ModelConfig | None = None, avg_window_sec: int = 60,
+                 spot_source: str = "coinbase", only: set[str] | None = None) -> Dataset:
     cfg = cfg or ModelConfig()
     bars = load_bars(cache)
     keys = [b.ts for b in bars]
@@ -176,7 +188,9 @@ def load_dataset(cache: Path, cfg: ModelConfig | None = None, avg_window_sec: in
             continue
         if not str(rec.get("series", "")).upper().startswith("KXBTC"):
             continue
-        steps, why, missing = build_market_steps(rec, bars, keys, cfg, avg_window_sec)
+        if only is not None and (rec.get("market") or {}).get("ticker") not in only:
+            continue
+        steps, why, missing = build_market_steps(rec, bars, keys, cfg, avg_window_sec, spot_source)
         ds.rules_missing += int(missing)
         if why:
             skipped[why] += 1

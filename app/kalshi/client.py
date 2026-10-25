@@ -158,6 +158,11 @@ class KalshiClient:
                 break
         return markets
 
+    async def get_event_live_data(self, event_ticker: str, range_: str | None = None) -> dict[str, Any]:
+        """Settlement index for an event (crypto: CF Benchmarks 1-minute candles)."""
+        params = {"range": range_} if range_ else None
+        return await self._get(f"/live_data/events/{event_ticker}", params=params)
+
     async def get_market(self, ticker: str) -> dict[str, Any]:
         data = await self._get(f"/markets/{ticker}")
         market = data.get("market")

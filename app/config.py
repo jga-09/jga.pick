@@ -81,6 +81,9 @@ class Settings(BaseSettings):
     stale_data_sec: float = Field(30.0, ge=5)
     underlying_provider: Literal["none", "coinbase", "coinbase_exchange"] = "none"
     # --- BTC engine (STRATEGY_MODE=btc) -----------------------------------
+    # "coinbase" (default) or "index": Kalshi's own settlement index (CF Benchmarks) via
+    # /live_data/events, with automatic Coinbase fallback. Volatility still uses Coinbase 1-min bars.
+    btc_spot_source: Literal["coinbase", "index"] = "coinbase"
     btc_feed_stale_sec: float = Field(15.0, ge=2, le=120)
     btc_basis_bps: float = Field(3.0, ge=0, le=100)  # Coinbase vs Kalshi settlement index uncertainty
     btc_sigma_window_min: int = Field(60, ge=15, le=300)

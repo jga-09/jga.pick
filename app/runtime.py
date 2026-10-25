@@ -23,6 +23,7 @@ from app.database.repository import Repository
 from app.errors import KalshiAuthError, KalshiError, TradingError
 from app.kalshi.auth import KalshiSigner
 from app.kalshi.keystore import KeyStore
+from app.data.settlement_index import SettlementIndexFeed
 from app.telegram.pnl_dashboard import DashboardData, TradeRow, render_dashboard
 from app.telegram.pnl_image import ET, PnlCard
 from app.kalshi.market_data import MarketDataService, MarketInfo, MarketSnapshot
@@ -117,6 +118,7 @@ class BotRuntime:
 
         self._research = ResearchCache()
         self._strong: dict[str, str] = {}  # ticker -> direction currently alerted as strong
+        self.settlement_index = SettlementIndexFeed()
         self._exit_ticks: dict[int, int] = {}  # position id -> consecutive checks saying "exit"
         self._exit_suggested: set[int] = set()  # live positions already offered a Sell button
         self._early_exits: dict[str, list[Position]] = {}  # ticker -> positions cashed out early (to score later)
@@ -453,6 +455,8 @@ class BotRuntime:
         now = now or utcnow()
         terms = interpret_contract(snap.info, require_rules=self.settings.require_settlement_rules)
         feed = self.underlying
+        if spot is None and self.settings.btc_spot_source == "index" and not self.fixture_mode:
+            spot = await self.settlement_index.latest(self.client, snap.info.event_ticker, now)
         if spot is None:
             spot = await feed.get_price("BTC")
         bars_fn = getattr(feed, "bars", None)
