@@ -116,11 +116,13 @@ def _record_trades(record: dict[str, Any]) -> list[TradePrint]:
 
 # ---------------------------------------------------------------- downloader
 class HistoryDownloader:
-    def __init__(self, client: Any, cache_dir: str | Path, concurrency: int = 6) -> None:
+    def __init__(self, client: Any, cache_dir: str | Path, concurrency: int = 6, trades: bool = True) -> None:
         self.client = client
         self.cache = Path(cache_dir)
         self.cache.mkdir(parents=True, exist_ok=True)
         self.sem = asyncio.Semaphore(concurrency)
+        self.trades = trades  # False = candles only (~2x faster; trade-flow features missing)
+        self.historical_only: set[str] = set()  # past the cutoff: skip the live endpoint (saves a request)
 
     async def settled_markets(self, series: str, since: datetime, until: datetime,
                               max_pages: int = 40) -> list[dict[str, Any]]:
@@ -142,7 +144,10 @@ class HistoryDownloader:
                 break
             page = [m for m in data.get("markets") or [] if isinstance(m, dict)]
             for m in page:
-                found.setdefault(m.get("ticker", ""), m)
+                t = m.get("ticker", "")
+                if t not in found:
+                    found[t] = m
+                    self.historical_only.add(t)
             closes = [parse_ts(m.get("close_time")) for m in page]
             cursor = data.get("cursor") or None
             if not cursor or not page or all(c is not None and c < since for c in closes):
@@ -158,7 +163,9 @@ class HistoryDownloader:
         ticker = market["ticker"]
         path = self.cache / f"{ticker}.json.gz"
         if path.exists():
-            return json.loads(gzip.decompress(path.read_bytes()))
+            cached = json.loads(gzip.decompress(path.read_bytes()))
+            if not (self.trades and cached.get("no_trades")):
+                return cached  # (a candles-only record is re-fetched when trades are wanted)
         legacy = self.cache / f"{ticker}.json"
         if legacy.exists():  # old uncompressed cache: convert in place (frees disk space)
             record = compact_record(json.loads(legacy.read_text()))
@@ -172,16 +179,21 @@ class HistoryDownloader:
             start, end = int(open_t.timestamp()), int(close_t.timestamp())
             try:
                 candles = await self._candles(series, ticker, start, end)
-                trades = await self._trades(ticker, start, end)
+                trades = await self._trades(ticker, start, end) if self.trades else []
             except KalshiError as exc:
                 log.warning("REPLAY_DOWNLOAD_FAILED ticker=%s error=%s", ticker, exc)
                 return None
         record = compact_record({"market": market, "series": series, "candles": candles, "trades": trades})
+        if not self.trades:
+            record["no_trades"] = True
         path.write_bytes(gzip.compress(json.dumps(record).encode()))
         return record
 
     async def _candles(self, series: str, ticker: str, start: int, end: int) -> list[dict[str, Any]]:
         params = {"start_ts": start - 60, "end_ts": end, "period_interval": 1}
+        if ticker in self.historical_only:
+            data = await self.client.get(f"/historical/markets/{ticker}/candlesticks", params)
+            return data.get("candlesticks") or []
         try:
             data = await self.client.get(f"/series/{series}/markets/{ticker}/candlesticks", params)
             if data.get("candlesticks"):
@@ -194,7 +206,10 @@ class HistoryDownloader:
 
     async def _trades(self, ticker: str, start: int, end: int) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
-        for path in ("/markets/trades", "/historical/trades"):
+        paths = ["/markets/trades", "/historical/trades"]
+        if ticker in self.historical_only:
+            paths.reverse()
+        for path in paths:
             cursor: str | None = None
             for _ in range(20):
                 try:

@@ -218,3 +218,23 @@ async def test_cache_is_compact_and_legacy_files_are_converted(tmp_path):
     b = replay_market(rec, "BTC", spot_prices, replay_engine)
     assert [(o.minute, o.direction, o.quality) for o in a] == [(o.minute, o.direction, o.quality) for o in b]
     await client.close()
+
+
+async def test_fast_download_modes(tmp_path):
+    transport, markets, calls = _kalshi_transport(4)
+    client = KalshiClient(make_settings(data_source="kalshi", kalshi_read_rps=50), transport=transport)
+    # candles only: no trade requests, record flagged
+    fast = HistoryDownloader(client, tmp_path, trades=False)
+    rec = await fast.market_data("KXBTC15M", markets[1])
+    assert rec["candles"] and rec["trades"] == [] and rec["no_trades"]
+    assert not any(c.endswith("/trades") for c in calls)
+    # a full run later re-fetches that market with trades instead of reusing the candles-only file
+    full = HistoryDownloader(client, tmp_path)
+    rec2 = await full.market_data("KXBTC15M", markets[1])
+    assert len(rec2["trades"]) == 43 and not rec2.get("no_trades")
+    # markets known to be past the historical cutoff skip the live endpoint
+    calls.clear()
+    full.historical_only.add(markets[3]["ticker"])
+    assert (await full.market_data("KXBTC15M", markets[3]))["candles"]
+    assert not any(c.endswith(f"/series/KXBTC15M/markets/{markets[3]['ticker']}/candlesticks") for c in calls)
+    await client.close()

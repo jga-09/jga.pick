@@ -45,7 +45,8 @@ from app.utils.logging import setup_logging  # noqa: E402
 ROOT = Path(__file__).resolve().parents[1]
 
 
-async def download_and_replay(s: Settings, days: int, assets: list[str], db: Repository) -> ReplayStats:
+async def download_and_replay(s: Settings, days: int, assets: list[str], db: Repository,
+                              trades: bool = True) -> ReplayStats:
     signer = None
     if s.has_kalshi_credentials:
         try:
@@ -53,7 +54,8 @@ async def download_and_replay(s: Settings, days: int, assets: list[str], db: Rep
         except KalshiAuthError:
             signer = None  # public endpoints work without signing
     client = KalshiClient(s, signer)
-    dl = HistoryDownloader(client, ROOT / "data" / "replay_cache")
+    dl = HistoryDownloader(client, ROOT / "data" / "replay_cache",
+                           concurrency=max(6, int(s.kalshi_read_rps)), trades=trades)
     spot = CoinbaseHistory(ROOT / "data" / "replay_cache")
     stats = ReplayStats()
     summary: list[str] = []
@@ -102,7 +104,9 @@ async def download_and_replay(s: Settings, days: int, assets: list[str], db: Rep
                     stats.observations += len(obs)
                     batch.extend(obs)
                 rate = done / max(1e-6, time.time() - t0)
-                print(f"  {done}/{len(markets)} markets  ({rate:.1f}/s)", end="\r", flush=True)
+                eta = (len(markets) - done) / max(rate, 1e-6)
+                print(f"  {done}/{len(markets)} markets  ({rate:.1f}/s, ~{eta / 60:.0f} min left)   ",
+                      end="\r", flush=True)
                 if batch:
                     db.add_observations(batch)
                     batch = []
@@ -130,9 +134,15 @@ def main() -> None:
     ap.add_argument("--assets", default=None, help="comma list, default = ASSETS from .env")
     ap.add_argument("--db", default=str(ROOT / "data" / "replay.db"))
     ap.add_argument("--report-only", action="store_true", help="skip downloading; analyse stored replay data")
+    ap.add_argument("--rps", type=float, default=15.0,
+                    help="Kalshi requests per second (default 15; lower it if you see rate-limit errors)")
+    ap.add_argument("--no-trades", action="store_true",
+                    help="download candles only: ~2x faster and smaller; enough for scripts/fairvalue.py, "
+                         "but the momentum replay loses its trade-flow features")
     args = ap.parse_args()
     setup_logging("WARNING")
     s = Settings()
+    s = s.model_copy(update={"kalshi_read_rps": max(1.0, min(args.rps, 20.0))})
     assets = [a.strip().upper() for a in (args.assets or ",".join(s.asset_list)).split(",") if a.strip()]
     repo = Repository(Database(f"sqlite:///{Path(args.db).resolve()}"))
     repo.init()
@@ -143,7 +153,7 @@ def main() -> None:
         repo = Repository(Database(f"sqlite:///{Path(args.db).resolve()}"))
         repo.init()
         try:
-            stats = asyncio.run(download_and_replay(s, args.days, assets, repo))
+            stats = asyncio.run(download_and_replay(s, args.days, assets, repo, trades=not args.no_trades))
         except (OSError, OperationalError) as exc:
             if "full" in str(exc).lower() or getattr(exc, "errno", None) == 28:
                 print("\n❌ DISK FULL. Free space, then re-run (finished downloads are cached):\n"
