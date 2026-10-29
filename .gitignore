@@ -22,3 +22,4 @@ data/*
 *.db-wal
 *.db-shm
 logs/
+kalshi_cache/
