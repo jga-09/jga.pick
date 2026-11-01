@@ -5,7 +5,8 @@ from __future__ import annotations
 from html import escape
 from typing import TYPE_CHECKING, Any
 
-from app import APP_NAME
+from app import DISPLAY_NAME as APP_NAME
+from app import __version__
 from app.kalshi.market_data import ASSET_ICONS, MarketSnapshot
 from app.risk.profiles import RiskLevel, RiskProfile
 from app.strategy.signals import Direction, SignalResult, Validity
@@ -62,6 +63,10 @@ def _pct(v: float | None) -> str:
 
 # -------------------------------------------------------------------- home
 def home(rt: BotRuntime) -> Screen:
+    if rt.btc_mode:
+        from app.telegram import btc_views
+
+        return btc_views.home(rt)
     st = rt.state
     h = rt.health()
     run = "🔴 Stopped" if not st.running else ("⏸ Paused" if st.paused else "🟢 Running")
@@ -141,6 +146,10 @@ def _time_window(rt: BotRuntime, bucket: str) -> str:
 
 
 def signal_card(rt: BotRuntime, ticker: str) -> Screen:
+    if rt.btc_mode:
+        from app.telegram import btc_views
+
+        return btc_views.signal(rt)
     view = rt.view(ticker)
     if view is None or view.snapshot is None:
         return Screen("⚪ No data for this market yet.", [[("🔄 Refresh", f"mkt:{ticker}"), ("🔙 Back", "signals")]],
@@ -251,6 +260,10 @@ def _dot(ok: bool, yes: str, no: str) -> str:
 
 
 def status(rt: BotRuntime) -> Screen:
+    if rt.btc_mode:
+        from app.telegram import btc_views
+
+        return btc_views.status(rt)
     st, h = rt.state, rt.health()
     view = rt.focus_view()
     stats = rt.portfolio.stats(st.mode, days=0)
@@ -274,6 +287,7 @@ def status(rt: BotRuntime) -> Screen:
         "Telegram: 🟢 CONNECTED",
         f"Kalshi: {kalshi}",
         f"Market Data: {md}",
+        *(btc_status_lines(rt) if rt.btc_mode else []),
         f"Signal Engine: {_dot(st.running, 'ACTIVE', 'IDLE')}",
         "Risk Manager: 🟢 ACTIVE",
         f"Trade Engine: {mode_badge(st.mode)}{' · 🔴 BLOCKED' if not st.trading_allowed else ''}",
@@ -292,8 +306,28 @@ def status(rt: BotRuntime) -> Screen:
     return Screen("\n".join(lines), [[("🔄 Refresh", "status"), BACK]], route="status", refreshable=True)
 
 
+def btc_status_lines(rt: BotRuntime) -> list[str]:
+    from app.telegram import btc_views
+
+    return btc_views.status_lines(rt)
+
+
 # -------------------------------------------------------------------- risk
-def profile_params(p: RiskProfile) -> list[str]:
+def profile_params(p: RiskProfile, btc: bool = False) -> list[str]:
+    if btc:
+        return [
+            f"Min net edge: {p.min_ev_cents:+g}¢/contract",
+            f"Min signal strength: {p.min_btc_strength}",
+            f"Max uncertainty: {p.max_prob_width * 100:.0f} pts",
+            f"Max Position: ${p.max_position_usd:g} · Max exposure ${p.max_total_exposure_usd:g}",
+            f"Max Open: {p.max_open_positions}",
+            f"Daily Loss Limit: ${p.max_daily_loss_usd:g}",
+            f"Max Spread: {p.max_spread_cents:g}¢ · Min liquidity {p.min_liquidity_contracts:g}",
+            f"Min Time: {p.min_time_remaining_sec} sec",
+            f"Cooldown: {p.trade_cooldown_sec}s/market · pause after {p.max_consecutive_losses} losses",
+            f"Blocked regimes: {', '.join(sorted(p.regimes_blocked)) or 'none'}",
+            f"Calibration required: {'yes' if p.require_known_ev else 'paper may trade while collecting'}",
+        ]
     return [
         f"Confidence: ≥ {p.min_confidence}",
         f"Max Position: ${p.max_position_usd:g}",
@@ -309,7 +343,7 @@ def profile_params(p: RiskProfile) -> list[str]:
 def risk_menu(rt: BotRuntime) -> Screen:
     st = rt.state
     lines = ["🛡 <b>TRADING RISK</b>", "", "Current:", st.risk_level.badge, "", "Select:", "", SEP, "",
-             "CURRENT PARAMETERS", "", *profile_params(rt.profile())]
+             "CURRENT PARAMETERS", "", *profile_params(rt.profile(), rt.btc_mode)]
     buttons = [[(lvl.badge, f"rset:{lvl.value}")] for lvl in RiskLevel]
     buttons += [[("⚙️ Customize", "rcust"), BACK]]
     return Screen("\n".join(lines), buttons, route="risk")
@@ -327,7 +361,8 @@ def risk_confirm(rt: BotRuntime, new: RiskLevel) -> Screen:
     cur = rt.state.risk_level
     lines = ["⚠️ <b>CHANGE RISK LEVEL</b>", "", "Current:", cur.badge, "", "New:", new.badge, "",
              f"{new.title} allows:", *[f"• {e}" for e in RISK_EFFECTS[new]], "",
-             *profile_params(rt.profile(new)), "", "<i>Risk level does not change paper/live mode.</i>"]
+             *profile_params(rt.profile(new), rt.btc_mode), "",
+             "<i>Risk level does not change paper/live mode and never enables real-money trading.</i>"]
     return Screen("\n".join(lines), [[("✅ Confirm", f"rok:{new.value}"), ("❌ Cancel", "risk")]], route="risk")
 
 
@@ -340,18 +375,39 @@ RISK_FIELDS: dict[str, tuple[str, str, float]] = {
     "time": ("min_time_remaining_sec", "Min Time s", 30),
     "spr": ("max_spread_cents", "Max Spread ¢", 1),
     "qual": ("min_signal_quality", "Quality", 5),
+    "ev": ("min_ev_cents", "Min Edge ¢", 1),
+    "str": ("min_btc_strength", "Strength", 5),
 }
+
+
+BTC_CUSTOM_FIELDS = ("ev", "str", "pos", "open", "loss", "time", "spr")
+QUALITY_CUSTOM_FIELDS = ("conf", "pos", "open", "loss", "time", "spr", "qual")
+
+
+def _custom_lines(p: RiskProfile, btc: bool) -> list[str]:
+    if not btc:
+        return [*profile_params(p), f"Max Exposure: ${p.max_total_exposure_usd:g}"]
+    return [
+        f"Min Edge: {p.min_ev_cents:+g}¢",
+        f"Strength: ≥ {p.min_btc_strength}",
+        f"Max Position: ${p.max_position_usd:g}",
+        f"Max Open: {p.max_open_positions}",
+        f"Daily Loss Limit: ${p.max_daily_loss_usd:g}",
+        f"Min Time: {p.min_time_remaining_sec} sec",
+        f"Max Spread: {p.max_spread_cents:g}¢",
+        f"Max Exposure: ${p.max_total_exposure_usd:g}",
+    ]
 
 
 def risk_customize(rt: BotRuntime, note: str = "") -> Screen:
     p = rt.profile()
-    lines = [f"⚙️ <b>CUSTOMIZE {p.level.badge}</b>", "", *profile_params(p),
-             f"Max Exposure: ${p.max_total_exposure_usd:g}", "",
+    lines = [f"⚙️ <b>CUSTOMIZE {p.level.badge}</b>", "", *_custom_lines(p, rt.btc_mode), "",
              "<i>Hard safety limits apply to every profile.</i>"]
     if note:
         lines += ["", escape(note)]
     rows: list[list[Button]] = []
-    for code, (_, label, _) in RISK_FIELDS.items():
+    for code in (BTC_CUSTOM_FIELDS if rt.btc_mode else QUALITY_CUSTOM_FIELDS):
+        label = RISK_FIELDS[code][1]
         rows.append([(f"➖ {label}", f"radj:{code}:-"), (f"➕ {label}", f"radj:{code}:+")])
     rows.append([("♻️ Reset", "rrst"), ("🔙 Back", "risk")])
     return Screen("\n".join(lines), rows, route="rcust")
@@ -359,6 +415,10 @@ def risk_customize(rt: BotRuntime, note: str = "") -> Screen:
 
 # ------------------------------------------------------------------ trades
 def trades(rt: BotRuntime, page: int = 0, per_page: int = 5) -> Screen:
+    if rt.btc_mode:
+        from app.telegram import btc_views
+
+        return btc_views.trades(rt, page)
     mode = rt.state.mode
     rows = rt.repo.closed_positions(mode=mode, limit=per_page, offset=page * per_page)
     total = rt.repo.count_closed(mode)
@@ -452,6 +512,10 @@ def history(rt: BotRuntime, period: str) -> Screen:
 
 # ---------------------------------------------------------------- strategy
 def strategy(rt: BotRuntime) -> Screen:
+    if rt.btc_mode:
+        from app.telegram import btc_views
+
+        return btc_views.strategy(rt)
     st, p = rt.state, rt.profile()
     und = rt.underlying.name
     lines = [
@@ -495,6 +559,10 @@ def indicators(rt: BotRuntime) -> Screen:
 
 # ------------------------------------------------------------------ config
 def config(rt: BotRuntime) -> Screen:
+    if rt.btc_mode:
+        from app.telegram import btc_views
+
+        return btc_views.settings(rt)
     st, p = rt.state, rt.profile()
     lines = [
         "⚙️ <b>CONFIGURATION</b>", "",
@@ -584,28 +652,29 @@ def live_mode_confirm() -> Screen:
 
 # ----------------------------------------------------------- trade tickets
 def ticket_screen(t: TradeTicket) -> Screen:
-    d = Direction(t.direction)
-    action = f"BUY {t.side.upper()}"
+    payout = money(t.contracts * 1.0, False)
+    body = [
+        escape(t.label),
+        f"<b>Buy {t.side.upper()}</b> · {t.contracts} contracts",
+        f"Price: {cents(t.quoted_price_cents)} each (pays at most {cents(t.limit_price_cents)})",
+        f"Cost: up to {money(t.max_cost, False)} incl. fees",
+        f"If {t.side.upper()} wins you get {payout}; if it loses you lose the cost.",
+        f"Risk level: {RiskLevel(t.risk_level).badge}",
+    ]
     if t.mode == "live":
-        lines = ["⚠️ <b>LIVE TRADE CONFIRMATION</b>", "", escape(t.label), "", "Signal:", f"{d.emoji} {d.value}", "",
-                 "Action:", action, "", "Price:", f"{cents(t.quoted_price_cents)} (limit {cents(t.limit_price_cents)})", "", "Contracts:", str(t.contracts), "",
-                 "Maximum Cost:", money(t.max_cost, False), "", "Risk:", RiskLevel(t.risk_level).badge, "",
-                 "<i>Expires in 60s. Risk is re-checked before submission.</i>"]
-        buttons = [[("✅ CONFIRM LIVE TRADE", f"tok:{t.id}")], [("❌ CANCEL", f"tno:{t.id}")]]
+        lines = ["⚠️ <b>REAL-MONEY ORDER</b>", "", *body, "",
+                 "<i>Uses real money on Kalshi. Expires in 60 seconds; risk is re-checked before sending.</i>"]
+        buttons = [[("✅ Confirm real-money order", f"tok:{t.id}")], [("❌ Cancel", f"tno:{t.id}")]]
     else:
-        lines = ["📝 <b>PAPER TRADE</b>", "", escape(t.label), "", "Direction:", f"{d.emoji} {d.value}", "",
-                 "Action:", action, "", "Entry:", f"{cents(t.quoted_price_cents)} (max {cents(t.limit_price_cents)})", "", "Contracts:", str(t.contracts), "",
-                 "Cost:", f"≤ {money(t.max_cost, False)} incl. est. fee", "",
-                 "Risk:", RiskLevel(t.risk_level).badge]
-        buttons = [[("✅ PAPER BUY", f"tok:{t.id}"), ("❌ CANCEL", f"tno:{t.id}")]]
+        lines = ["📝 <b>PAPER TRADE</b> <i>(practice money)</i>", "", *body]
+        buttons = [[("✅ Confirm", f"tok:{t.id}"), ("❌ Cancel", f"tno:{t.id}")]]
     return Screen("\n".join(lines), buttons, route="home")
 
 
-def trade_result(pos: Position) -> Screen:
-    head = "⚠️ <b>LIVE ORDER FILLED</b>" if pos.mode == "live" else "✅ <b>PAPER ORDER FILLED</b>"
-    text = (f"{head}\n\n{escape(pos.label)}\nBUY {pos.side.upper()} x{pos.contracts} @ {cents(pos.entry_price)}\n"
-            f"Cost: {money(pos.cost, False)} · Fee: {money(pos.entry_fee, False)}")
-    return Screen(text, [[("📂 Positions", "pos"), ("🏠 Home", "home")]], route="pos")
+def trade_result(pos: Position, direction: str = "", why: str = "") -> Screen:
+    text = trade_card(pos, direction or ("UP" if pos.side == "yes" else "DOWN"), why)
+    text += "\n<i>Settles when the market closes - you'll get a message.</i>"
+    return Screen(text, [[("💰 Trades", "trades:0"), ("🏠 Home", "home")]], route="pos")
 
 
 def notice(text: str, back: str = "home") -> Screen:
@@ -641,7 +710,8 @@ def unauthorized() -> Screen:
 def help_text() -> str:
     return "\n".join([
         f"📡 <b>{APP_NAME} — commands</b>", "",
-        "/menu — dashboard", "/status — bot status", "/markets — active markets",
+        "/menu — dashboard", "/btc — BTC 15-min signal", "/analytics — performance & calibration",
+        "/backtest — last backtest report", "/calibration — model calibration", "/status — bot status", "/markets — active markets",
         "/signals — current signals", "/risk — risk profile", "/config — configuration",
         "/positions — open positions", "/trades — recent trades", "/pnl — today's P&L",
         "/history — performance", "/strategy — strategy info", "/pause · /resume — trading",
@@ -688,15 +758,91 @@ def flip_alert(flip: SignalFlip) -> str:
                       "Previous:", f"{p.confidence}%", "", "New:", f"{c.confidence}%", "", "Reason:", escape(reason)])
 
 
-def trade_opened_alert(pos: Position) -> str:
-    return (f"{'⚠️ LIVE' if pos.mode == 'live' else '📝 PAPER'} <b>TRADE OPENED</b>\n{escape(pos.label)} · "
-            f"BUY {pos.side.upper()} x{pos.contracts} @ {cents(pos.entry_price)}")
+CARD_LINE = "────────────"
 
 
-def trade_closed_alert(pos: Position) -> str:
-    return (f"{'✅' if pos.won else '❌'} <b>TRADE CLOSED</b> · {pos.mode.upper()}\n{escape(pos.label)} "
-            f"{pos.side.upper()} @ {cents(pos.entry_price)} → {cents(pos.exit_price)}\n"
-            f"P&L: {money(pos.realized_pnl)} ({escape(pos.close_reason or '')})")
+def _footer(pos: Position | None = None) -> str:
+    mode = "" if pos is None else f" · {'🔴 Live' if pos.mode == 'live' else '📝 Paper'}"
+    return f"<i>{APP_NAME} v{__version__}</i>{mode}"
+
+
+def _dir(pos: Position, direction: str) -> str:
+    arrow = "▲" if direction == "UP" else "▼"
+    return f"<b>{escape(pos.asset)} {arrow} {direction}</b>"
+
+
+def _signed(v: float | None) -> str:
+    v = v or 0.0
+    return f"{'+' if v >= 0 else '−'}${abs(v):,.2f}"
+
+
+def _sh(n: int, short: bool = False) -> str:
+    return f"{n} sh" if short else f"{n} share{'' if n == 1 else 's'}"
+
+
+def trade_card(pos: Position, direction: str, why: str = "") -> str:
+    """Compact "Trade Taken" card (also used after a manual confirm)."""
+    mode = "🔴 Live" if pos.mode == "live" else "📝 Paper"
+    lines = [
+        f"🟢 <b>Trade Taken</b>  ·  {mode}",
+        f"{_dir(pos, direction)}  ·  {escape(pos.label)}",
+        CARD_LINE,
+        f"{_sh(pos.contracts)} @ {pos.entry_price:.0f}¢",
+        f"cost <b>{money(pos.cost, False)}</b>  ·  fee {money(pos.entry_fee, False)}  ·  "
+        f"total {money(pos.cost + pos.entry_fee, False)}",
+    ]
+    if why:
+        lines.append(f"📖 <i>Read: {escape(why, quote=False)}</i>")
+    return "\n".join(lines + ["", _footer()])
+
+
+def trade_opened_alert(pos: Position, direction: str = "", why: str = "") -> str:
+    return trade_card(pos, direction or ("UP" if pos.side == "yes" else "DOWN"), why)
+
+
+def trade_closed_alert(pos: Position, direction: str = "", summary: str = "") -> str:
+    direction = direction or ("UP" if pos.side == "yes" else "DOWN")
+    pnl = pos.realized_pnl or 0.0
+    reason = pos.close_reason or ""
+    if reason.startswith("settled"):
+        head = "🎉 <b>WON</b>" if pos.won else "❌ <b>Lost</b>"
+        body = [
+            f"{escape(pos.label)}  ·  {_sh(pos.contracts, True)} @ {pos.entry_price:.0f}¢",
+            f"cost {money(pos.cost, False)}  →  <b>{_signed(pnl)}</b>  {'✅' if pos.won else ''}".rstrip(),
+        ]
+    else:
+        head = "💰 <b>CASHED OUT</b>" if pnl >= 0 else "✂️ <b>SOLD EARLY</b>"
+        body = [
+            f"{_sh(pos.contracts, True)} @ {pos.entry_price:.0f}¢  →  sold @ {(pos.exit_price or 0):.0f}¢",
+            f"{'Locked in' if pnl >= 0 else 'Loss'}  <b>{_signed(pnl)}</b>  {'🔒' if pnl >= 0 else ''}".rstrip(),
+        ]
+        if reason:
+            body.append(f"<i>{escape(reason)}</i>")
+    if summary:
+        body.append(f"📖 <i>Read: {escape(summary, quote=False)}</i>")
+    return "\n".join([f"{head}  ·  {_dir(pos, direction)}", CARD_LINE, *body, "", _footer(pos)])
+
+
+def exit_suggestion(pos: Position, direction: str, reason: str, bid: float) -> str:
+    est = pos.unrealized_pnl(bid)
+    return "\n".join([f"⚠️ <b>CASH OUT?</b>  ·  {_dir(pos, direction)}", CARD_LINE,
+                      f"{_sh(pos.contracts, True)} @ {pos.entry_price:.0f}¢  →  bid {bid:.0f}¢",
+                      f"Selling now: <b>{_signed(est)}</b>",
+                      f"<i>{escape(reason, quote=False)}</i>", "",
+                      "Real money: nothing is sold unless you tap Sell.", _footer(pos)])
+
+
+def exit_check(pos: Position, direction: str, result: str, hold: float, saved: float, st: dict) -> str:
+    verdict = (f"✅ Cashing out saved <b>{_signed(saved)}</b>" if saved > 0
+               else f"❌ Cashing out cost <b>{_signed(saved)}</b>" if saved < 0 else "➖ Same either way")
+    total = st.get("saved", 0.0)
+    return "\n".join([f"🔎 <b>EARLY EXIT CHECK</b>  ·  {_dir(pos, direction)}", CARD_LINE,
+                      f"Market settled {result.upper()}",
+                      f"Holding would have been: {_signed(hold)}",
+                      f"Cashing out got: {_signed(pos.realized_pnl or 0)}",
+                      verdict, "",
+                      f"<i>All early exits so far: {int(st.get('exits', 0))} · net {_signed(total)} "
+                      f"({int(st.get('helped', 0))} helped, {int(st.get('hurt', 0))} hurt)</i>"])
 
 
 def large_loss_alert(pos: Position) -> str:

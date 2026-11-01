@@ -174,3 +174,42 @@ async def test_reset_paper_keeps_research_data(runtime):
     assert runtime.repo.count_closed("paper") == 0 and runtime.repo.daily("paper") is None
     assert runtime.repo.count_observations() == (1, 0)  # research data untouched
     assert Portfolio(runtime.repo, 1000).paper_balance() == 1000
+
+
+async def _live_with(repo, get_orders):  # type: ignore[no-untyped-def]
+    from app.errors import KalshiTransientError
+
+    client = MagicMock()
+    client.signer = object()
+    client.create_order_v2 = AsyncMock(side_effect=KalshiTransientError("timeout on /portfolio/events/orders"))
+    client.get_orders = get_orders
+    settings = make_settings(data_source="kalshi", live_trading=True, paper_trading=False)
+    portfolio = Portfolio(repo, 1000)
+    return LiveExecutor(client, settings, portfolio), client, portfolio
+
+
+async def test_live_timeout_reconciles_filled_order_without_resubmitting(repo, monkeypatch):
+    t = ticket(mode="live")
+    live, client, portfolio = await _live_with(repo, AsyncMock(return_value=[
+        {"client_order_id": t.client_order_id, "order_id": "o9", "fill_count_fp": "5.00", "yes_price_dollars": "0.6400"}]))
+    pos = await live.buy(t, quote_snapshot(make_info()), confirmed=True)
+    assert client.create_order_v2.await_count == 1  # never resubmitted
+    assert pos.contracts == 5 and pos.entry_price == pytest.approx(64)
+
+
+async def test_live_timeout_verified_not_placed(repo):
+    live, client, _ = await _live_with(repo, AsyncMock(return_value=[]))
+    with pytest.raises(OrderRejectedError, match="NOT placed"):
+        await live.buy(ticket(mode="live"), quote_snapshot(make_info()), confirmed=True)
+    assert client.create_order_v2.await_count == 1
+
+
+async def test_live_unknown_outcome_blocks_the_market(repo, monkeypatch):
+    from app.errors import KalshiTransientError, TradingError
+
+    monkeypatch.setattr("app.trading.live.asyncio.sleep", AsyncMock())
+    live, client, portfolio = await _live_with(repo, AsyncMock(side_effect=KalshiTransientError("down")))
+    with pytest.raises(TradingError, match="UNKNOWN"):
+        await live.buy(ticket(mode="live"), quote_snapshot(make_info()), confirmed=True)
+    ctx = portfolio.risk_context(mode="live", trading_enabled=True, disabled_reason="", mode_permitted=True)
+    assert "KXBTC15M-TEST" in ctx.inflight_tickers and client.create_order_v2.await_count == 1

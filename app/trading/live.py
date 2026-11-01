@@ -15,7 +15,9 @@ import logging
 from typing import Any
 
 from app.config import Settings
-from app.errors import KalshiError, LiveTradingDisabledError, OrderRejectedError
+import asyncio
+
+from app.errors import KalshiError, KalshiTransientError, LiveTradingDisabledError, OrderRejectedError, TradingError
 from app.kalshi.execution import build_entry_order, build_exit_order
 from app.kalshi.market_data import MarketSnapshot, dollars_to_cents, to_float
 from app.trading.portfolio import Portfolio
@@ -94,6 +96,12 @@ class LiveExecutor:
                   qty=qty, price=price / 100)
         try:
             resp = await self.client.create_order_v2(body)
+        except KalshiTransientError as exc:
+            # Timeout / connection loss / 5xx: the order MAY have reached the exchange. Never resubmit;
+            # look it up by client_order_id instead.
+            repo.update_live_order(coid, status="unknown", error=str(exc)[:500])
+            log_event(log, "LIVE_ORDER_UNKNOWN", logging.ERROR, ticker=ticker, error=exc)
+            return await self._reconcile(coid, ticker)
         except KalshiError as exc:
             repo.update_live_order(coid, status="error", error=str(exc)[:500])
             log_event(log, "LIVE_ORDER_ERROR", logging.ERROR, ticker=ticker, error=exc)
@@ -101,6 +109,30 @@ class LiveExecutor:
         repo.update_live_order(coid, status="accepted", exchange_order_id=str(resp.get("order_id", "")),
                                response=resp)
         return resp
+
+    async def _reconcile(self, coid: str, ticker: str, attempts: int = 3) -> dict[str, Any]:
+        repo = self.portfolio.repo
+        for i in range(attempts):
+            try:
+                orders = await self.client.get_orders(ticker)
+            except KalshiError:
+                await asyncio.sleep(1.0 * (i + 1))
+                continue
+            match = next((o for o in orders if o.get("client_order_id") == coid), None)
+            if match is None:
+                repo.update_live_order(coid, status="not_placed")
+                raise OrderRejectedError("order outcome was unknown; verified it was NOT placed at Kalshi")
+            resp = {"order_id": match.get("order_id"),
+                    "fill_count": match.get("fill_count_fp", match.get("fill_count")),
+                    # exact average fill price is not in the order object; the limit is the worst case
+                    "average_fill_price": match.get("yes_price_dollars"), "average_fee_paid": None}
+            repo.update_live_order(coid, status="reconciled", exchange_order_id=str(match.get("order_id", "")),
+                                   response=match)
+            log_event(log, "LIVE_ORDER_RECONCILED", ticker=ticker, fill=resp["fill_count"])
+            return resp
+        self.portfolio.unresolved.add(ticker)  # blocks new orders on this market until resolved
+        raise TradingError(f"order status UNKNOWN for {ticker}: new orders on this market are blocked; "
+                           "check Kalshi before trading it again")
 
     def _fill(self, resp: dict[str, Any], side: str, limit_cents: float) -> tuple[int, float, float]:
         filled = int(to_float(resp.get("fill_count")) or 0)

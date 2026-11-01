@@ -35,19 +35,34 @@ class PositionSizer:
         balance_usd: float,
         open_exposure_usd: float,
         liquidity_contracts: float | None,
+        scale: float | None = None,
+        p_win: float | None = None,
+        remaining_daily_loss_usd: float | None = None,
     ) -> SizeResult:
+        """Contracts to buy. A binary buy can lose its whole cost, so every budget is a loss budget.
+
+        ``p_win`` (conservative win probability) adds a fractional-Kelly cap;
+        ``remaining_daily_loss_usd`` caps the stake at what is left of the daily loss limit.
+        """
         if price_cents <= 0 or price_cents >= 100:
             return SizeResult(0, price_cents, 0.0, 0.0, "invalid price")
 
-        # Scale between 50% and 100% of max size by how far confidence clears the bar.
-        span = max(1, 100 - profile.min_confidence)
-        scale = 0.5 + 0.5 * min(1.0, max(0.0, (confidence - profile.min_confidence) / span))
+        if scale is None:
+            # Scale between 50% and 100% of max size by how far confidence clears the bar.
+            span = max(1, 100 - profile.min_confidence)
+            scale = 0.5 + 0.5 * min(1.0, max(0.0, (confidence - profile.min_confidence) / span))
         budgets = {
-            "profile max position": profile.max_position_usd * scale,
+            "profile max position": profile.max_position_usd * max(0.0, min(1.0, scale)),
             "total exposure limit": profile.max_total_exposure_usd - open_exposure_usd,
             "balance fraction": balance_usd * profile.max_balance_fraction,
             "available balance": balance_usd,
         }
+        if remaining_daily_loss_usd is not None:
+            budgets["remaining daily loss"] = remaining_daily_loss_usd
+        if p_win is not None:
+            c = price_cents / 100 * (1 + self.fee_rate * (1 - price_cents / 100))
+            kelly = (p_win - c) / (1 - c) if c < 1 else 0.0
+            budgets["kelly cap"] = balance_usd * profile.kelly_fraction * max(0.0, kelly)
         factor, budget = min(budgets.items(), key=lambda kv: kv[1])
         if budget <= 0:
             return SizeResult(0, price_cents, 0.0, 0.0, factor)

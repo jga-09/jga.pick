@@ -15,6 +15,7 @@ from app.errors import ConfigError, InvalidCallbackError, TradingError
 from app.risk.profiles import RiskLevel
 from app.runtime import BotRuntime
 from app.telegram import analytics_views as AV
+from app.telegram import btc_views as BV
 from app.telegram import messages as M
 from app.telegram.keyboards import Screen
 from app.utils.logging import log_event
@@ -33,6 +34,8 @@ ACTIONS: dict[str, tuple[int, ...]] = {
     "assets": (0,), "focus": (1,), "possz": (0,), "auto": (0, 1), "mode": (0, 1), "modeok": (1,),
     "why": (1,), "chk": (1,), "anl": (0,), "anld": (0,), "cal": (0,), "loss": (0,), "wins": (0,),
     "exp": (0,), "filt": (0,), "feat": (0,),
+    "btc": (0,), "bwhy": (1,), "banl": (0,), "bcal": (0,), "bt": (0,),
+    "kacct": (0,), "keyset": (0,), "keydel": (0,),
     "clear": (0,), "estop": (0,), "estopok": (0,), "ereset": (0,), "eresetok": (0,), "pnl": (0,),
 }
 
@@ -43,6 +46,7 @@ class Response:
     toast: str | None = None
     clear: bool = False
     alert: bool = False  # show toast as a modal alert
+    start_key_setup: bool = False  # transport layer starts the /setkey flow
 
 
 def parse_callback(data: str | None) -> tuple[str, list[str]]:
@@ -160,6 +164,21 @@ class CallbackRouter:
     async def _on_feat(self, uid: int) -> Response:
         return Response(await asyncio.to_thread(AV.features, self.rt))
 
+    async def _on_btc(self, uid: int) -> Response:
+        return Response(BV.signal(self.rt))
+
+    async def _on_bwhy(self, uid: int, t: str) -> Response:
+        return Response(BV.why(self.rt, self._ticker(t)))
+
+    async def _on_banl(self, uid: int) -> Response:
+        return Response(await asyncio.to_thread(BV.analytics, self.rt))
+
+    async def _on_bcal(self, uid: int) -> Response:
+        return Response(await asyncio.to_thread(BV.calibration, self.rt))
+
+    async def _on_bt(self, uid: int) -> Response:
+        return Response(BV.backtest(self.rt))
+
     async def _on_trades(self, uid: int, page: str = "0") -> Response:
         p = int(page) if page.isdigit() else 0
         return Response(M.trades(self.rt, min(p, 1000)))
@@ -178,6 +197,21 @@ class CallbackRouter:
 
     async def _on_ind(self, uid: int) -> Response:
         return Response(M.indicators(self.rt))
+
+    async def _on_kacct(self, uid: int) -> Response:
+        from app.telegram import btc_views
+
+        return Response(btc_views.account(self.rt, await self.rt.kalshi_account()))
+
+    async def _on_keyset(self, uid: int) -> Response:
+        return Response(None, toast="🔑 Follow the steps below", start_key_setup=True)
+
+    async def _on_keydel(self, uid: int) -> Response:
+        from app.telegram import btc_views
+
+        removed = self.rt.clear_kalshi_key()
+        return Response(btc_views.account(self.rt, await self.rt.kalshi_account()),
+                        toast="🗑 Key removed" if removed else "No saved key")
 
     async def _on_cfg(self, uid: int) -> Response:
         return Response(M.config(self.rt))
@@ -311,7 +345,7 @@ class CallbackRouter:
         if ticket is None:
             return Response(None, toast="Ticket expired or already used", alert=True)
         pos = await self.rt.execute_ticket(ticket, confirmed=True)
-        return Response(M.trade_result(pos), toast="✅ Order filled")
+        return Response(M.trade_result(pos, *self.rt._card_meta(pos)), toast="✅ Order filled")
 
     async def _on_tno(self, uid: int, ticket_id: str) -> Response:
         self.rt.tickets.discard(ticket_id)

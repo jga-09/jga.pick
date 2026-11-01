@@ -158,6 +158,11 @@ class KalshiClient:
                 break
         return markets
 
+    async def get_event_live_data(self, event_ticker: str, range_: str | None = None) -> dict[str, Any]:
+        """Settlement index for an event (crypto: CF Benchmarks 1-minute candles)."""
+        params = {"range": range_} if range_ else None
+        return await self._get(f"/live_data/events/{event_ticker}", params=params)
+
     async def get_market(self, ticker: str) -> dict[str, Any]:
         data = await self._get(f"/markets/{ticker}")
         market = data.get("market")
@@ -182,6 +187,10 @@ class KalshiClient:
 
     async def get_positions(self) -> dict[str, Any]:
         return await self._get("/portfolio/positions", auth=True)
+
+    async def get_orders(self, ticker: str, limit: int = 100) -> list[dict[str, Any]]:
+        """GET /portfolio/orders for one market (used to reconcile orders with an unknown outcome)."""
+        return _list(await self._get("/portfolio/orders", {"ticker": ticker, "limit": limit}, auth=True), "orders")
 
     async def create_order_v2(self, body: dict[str, Any]) -> dict[str, Any]:
         """POST /portfolio/events/orders. Never retried automatically (no double orders)."""

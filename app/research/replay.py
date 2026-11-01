@@ -83,7 +83,7 @@ def parse_coinbase(raw: list[list[float]], asset: str) -> list[SpotPrice]:
 
 # ------------------------------------------------------------ compact cache
 _MARKET_KEYS = ("ticker", "event_ticker", "title", "yes_sub_title", "open_time", "close_time", "result",
-                "floor_strike", "cap_strike", "strike_type", "status")
+                "floor_strike", "cap_strike", "strike_type", "status", "rules_primary", "rules_secondary")
 
 
 def compact_record(record: dict[str, Any]) -> dict[str, Any]:

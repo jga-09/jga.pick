@@ -7,17 +7,25 @@ the Kalshi client or the database directly.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+from pathlib import Path
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
+from app import DISPLAY_NAME
 from app.config import Settings
 from app.data.underlying import NullUnderlyingProvider, UnderlyingPriceProvider
 from app.database.repository import Repository
 from app.errors import KalshiAuthError, KalshiError, TradingError
+from app.kalshi.auth import KalshiSigner
+from app.kalshi.keystore import KeyStore
+from app.data.settlement_index import SettlementIndexFeed
+from app.telegram.pnl_dashboard import DashboardData, TradeRow, render_dashboard
+from app.telegram.pnl_image import ET, PnlCard
 from app.kalshi.market_data import MarketDataService, MarketInfo, MarketSnapshot
 from app.kalshi.markets import MarketDiscovery
 from app.kalshi.websocket import KalshiWebSocket
@@ -27,12 +35,16 @@ from app.risk.sizing import PositionSizer
 from app.state import BotState, StateStore
 from app.research.adaptive import AdaptiveState, assess
 from app.research.calibration import HistEstimate, HistoricalModel
-from app.research.dataset import from_signal
+from app.research.btc_calibration import CalibrationReport, calibration_report
+from app.research.dataset import from_btc_signal, from_signal
+from app.kalshi.contract import interpret_contract
+from app.strategy.btc_decision import UNCALIBRATED, BTCInputs, BTCParams, BTCSignal, decide
+from app.strategy.btc_model import ModelConfig, classify_regime, compute_btc_features, estimate_probability
 from app.research.tradeanalysis import analyze_trade, describe, entry_snapshot, exit_snapshot
 from app.strategy.config import StrategyConfig
 from app.strategy.engine import SignalEngine
 from app.telegram import messages
-from app.strategy.signals import Direction, SignalResult
+from app.strategy.signals import SignalResult
 from app.trading.executor import TradeExecutor
 from app.trading.live import LiveExecutor
 from app.trading.paper import PaperExecutor
@@ -94,6 +106,9 @@ class BotRuntime:
         self.engine = SignalEngine(settings.signal_history_size, settings.signal_min_confidence,
                                    settings.stale_data_sec, min_history_sec=settings.signal_min_history_sec,
                                    config=self.strategy_config)
+        self.btc_mode = settings.strategy_mode == "btc"
+        self.btc_cfg = ModelConfig(sigma_window_min=settings.btc_sigma_window_min, basis_bps=settings.btc_basis_bps)
+        self.calibration: CalibrationReport | None = None
         self.model = self._build_model()
         self._model_built = time.time()
         self.adaptive = AdaptiveState("NORMAL")
@@ -103,6 +118,10 @@ class BotRuntime:
 
         self._research = ResearchCache()
         self._strong: dict[str, str] = {}  # ticker -> direction currently alerted as strong
+        self.settlement_index = SettlementIndexFeed()
+        self._exit_ticks: dict[int, int] = {}  # position id -> consecutive checks saying "exit"
+        self._exit_suggested: set[int] = set()  # live positions already offered a Sell button
+        self._early_exits: dict[str, list[Position]] = {}  # ticker -> positions cashed out early (to score later)
         self.risk = RiskManager(PositionSizer(settings.fee_rate), settings.stale_data_sec,
                                 settings.order_price_tolerance_cents, ev_gate=settings.ev_gate,
                                 strategy_mode=settings.strategy_mode)
@@ -138,6 +157,105 @@ class BotRuntime:
     def mode_permitted(self, mode: str | None = None) -> bool:
         mode = mode or self.state.mode
         return mode == "paper" or (self.settings.live_allowed and self.live is not None)
+
+    # ------------------------------------------------------- Kalshi API key
+    @property
+    def key_store(self) -> KeyStore:
+        return KeyStore(self.settings.kalshi_key_dir)
+
+    def kalshi_key_source(self) -> str:
+        """'env', 'telegram' or 'none' - which credentials the client is signing with."""
+        if getattr(self.client, "signer", None) is None:
+            return "none"
+        return "env" if self.settings.env_key_usable else "telegram"
+
+    async def set_kalshi_key(self, key_id: str, pem: bytes) -> float | None:
+        """Verify a key against Kalshi, then store it. Returns the balance in USD (None if unverified).
+
+        Raises KalshiAuthError if the key is invalid or Kalshi rejects it; nothing is stored then."""
+        if self.fixture_mode or not hasattr(self.client, "signer"):
+            raise KalshiAuthError(0, "fixture mode does not use Kalshi credentials")
+        signer = KalshiSigner(key_id, pem)  # raises on a bad PEM (message never contains key material)
+        old = self.client.signer
+        self.client.signer = signer
+        balance: float | None = None
+        try:
+            raw = await self.client.get_balance()
+            cents_ = raw.get("balance")
+            balance = None if cents_ is None else float(cents_) / 100
+        except KalshiAuthError:
+            self.client.signer = old
+            self.client.auth_failed = False
+            raise
+        except KalshiError:
+            pass  # network problem: keep the key, report it as not yet verified
+        self.key_store.save(key_id, pem)
+        if self.ws is not None:
+            self.ws.signer = signer
+        self.repo.add_event("KALSHI_KEY_SET", f"key {key_id[:4]}... via Telegram")
+        log.info("KALSHI_KEY_SET key=%s... verified=%s", key_id[:4], balance is not None)
+        return balance
+
+    async def kalshi_account(self) -> dict[str, Any]:
+        """Real Kalshi balance/positions for the account screen. Never raises; never returns key material."""
+        out: dict[str, Any] = {"source": self.kalshi_key_source(), "balance": None, "positions": None, "error": None}
+        if out["source"] == "none":
+            return out
+        try:
+            raw = await asyncio.wait_for(self.client.get_balance(), 8)
+            out["balance"] = None if raw.get("balance") is None else float(raw["balance"]) / 100
+            pos = await asyncio.wait_for(self.client.get_positions(), 8)
+            out["positions"] = sum(1 for p in pos.get("market_positions", []) if p.get("position"))
+        except KalshiAuthError:
+            out["error"] = "Kalshi rejected the key"
+        except (KalshiError, asyncio.TimeoutError):
+            out["error"] = "couldn't reach Kalshi right now"
+        return out
+
+    def clear_kalshi_key(self) -> bool:
+        removed = self.key_store.clear()
+        if self.kalshi_key_source() == "telegram":
+            self.client.signer = None
+        if removed:
+            self.repo.add_event("KALSHI_KEY_REMOVED", "via Telegram")
+        return removed
+
+    def pnl_card(self, mode: str, title: str = "TODAY'S P&L", last: Position | None = None,
+                 last_direction: str = "") -> PnlCard:
+        midnight = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        today = list(reversed(self.repo.closed_positions(mode=mode, since=midnight, limit=10_000)))
+        all_time = self.portfolio.stats(mode).realized
+        return PnlCard(title, mode, today, self.portfolio.balance(mode), all_time, last, last_direction)
+
+    def pnl_dashboard(self, mode: str, days: int = 14, title: str = "P&L OVERVIEW") -> DashboardData:
+        """Real finished trades for ``mode`` over the last ``days`` ET days (plus the period before)."""
+        today = utcnow().astimezone(ET).date()
+        start_et = datetime.combine(today - timedelta(days=days - 1), datetime.min.time(), tzinfo=ET)
+        since = start_et.astimezone(UTC)
+        prev_since = (start_et - timedelta(days=days)).astimezone(UTC)
+        rows_all = self.repo.closed_positions(mode=mode, since=prev_since, limit=100_000)
+        rows = [p for p in rows_all if p.closed_at and p.closed_at >= since]
+        prev = [p for p in rows_all if p.closed_at and p.closed_at < since]
+        trades = []
+        for pos in reversed(rows):  # oldest first
+            ctx = self.repo.trade_context(pos.id) if pos.id is not None else None
+            trades.append(TradeRow(pos, ((ctx or {}).get("entry") or {}).get("direction", "")))
+        prev_pnl = sum(p.realized_pnl or 0 for p in prev) if prev else None
+        return DashboardData(mode, trades, prev_pnl, self.portfolio.balance(mode), days, title, today,
+                             "/".join(self.settings.asset_list) or "BTC")
+
+    async def send_pnl_image(self, kind: str, key: str, caption: str, mode: str, last: Position | None = None,
+                             last_direction: str = "", title: str = "TODAY'S P&L") -> bool:
+        """P&L image with ``caption``. Returns False when disabled or failed (caller sends text instead)."""
+        if not self.settings.pnl_image or self.notifier is None or not hasattr(self.notifier, "photo"):
+            return False
+        try:
+            data = self.pnl_dashboard(mode, title="SESSION SUMMARY" if title.startswith("SESSION") else "P&L OVERVIEW")
+            png = await asyncio.to_thread(render_dashboard, data, DISPLAY_NAME)
+            return await self.notifier.photo(kind, key, png, caption)
+        except Exception:  # noqa: BLE001 - an image problem must never block trade messages
+            log.exception("PNL_IMAGE_FAILED kind=%s", kind)
+            return False
 
     async def notify(self, kind: str, key: str, text: str, buttons: list | None = None) -> None:
         if self.notifier is None:
@@ -184,6 +302,10 @@ class BotRuntime:
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
         self.repo.add_event("BOT_STOPPED")
+        mode = self.state.mode
+        await self.send_pnl_image("session_summary", f"summary:{utcnow():%Y%m%d%H%M}",
+                                  f"🏁 <b>Bot stopped</b> · today's results ({'real money' if mode == 'live' else 'paper'})",
+                                  mode, title="SESSION SUMMARY · TODAY")
 
     def should_auto_start(self) -> tuple[bool, str]:
         if not self.settings.auto_start:
@@ -232,6 +354,8 @@ class BotRuntime:
         self.store.update(risk_overrides=overrides)
 
     def set_auto_trade(self, on: bool) -> tuple[bool, str]:
+        if on and self.state.mode == "live" and self.btc_mode:
+            return False, "BTC engine: live orders always need manual confirmation (auto trade is paper only)."
         if on and self.state.mode == "live" and not self.settings.live_autotrade_allowed:
             return False, "Live auto-trading is disabled (ALLOW_LIVE_AUTOTRADE=false)."
         if on and self.state.emergency_stop:
@@ -245,7 +369,7 @@ class BotRuntime:
         if mode == "live" and not self.mode_permitted("live"):
             return False, "Live trading is disabled by configuration (LIVE_TRADING / PAPER_TRADING / credentials)."
         changes: dict[str, Any] = {"mode": mode}
-        if mode == "live" and not self.settings.live_autotrade_allowed:
+        if mode == "live" and (self.btc_mode or not self.settings.live_autotrade_allowed):
             changes["auto_trade"] = False
         self.store.update(**changes)
         self.repo.add_event("MODE_CHANGED", mode, "WARNING" if mode == "live" else "INFO")
@@ -296,10 +420,71 @@ class BotRuntime:
             "last_poll": self.last_poll_at,
             "last_error": self.last_error or self.discovery.state.last_error,
             "fixture": self.fixture_mode,
+            "btc_feed": self.btc_feed_status(),
         }
+
+    def btc_feed_status(self) -> Any:
+        status = getattr(self.underlying, "status", None)
+        return status() if callable(status) else None
+
+    # ------------------------------------------------------------- BTC engine
+    def btc_params(self, profile: RiskProfile | None = None) -> BTCParams:
+        p = profile or self.profile()
+        s = self.settings
+        return BTCParams(
+            min_ev_cents=p.min_ev_cents, min_strength=p.min_btc_strength, max_prob_width=p.max_prob_width,
+            max_spread_cents=p.max_spread_cents, min_liquidity=p.min_liquidity_contracts,
+            min_time_sec=p.min_time_remaining_sec, blocked_regimes=p.regimes_blocked,
+            max_late_move_cents=p.max_late_move_cents, require_calibration=p.require_known_ev,
+            fee_rate=s.fee_rate, slippage_cents=s.paper_slippage_cents, kalshi_stale_sec=s.stale_data_sec,
+            btc_stale_sec=s.btc_feed_stale_sec, max_skew_sec=s.max_data_skew_sec,
+            min_entry_cents=p.min_entry_price_cents, max_entry_cents=p.max_entry_price_cents,
+        )
+
+    def _kalshi_move(self, ticker: str, now: datetime, window: float = 300) -> float | None:
+        hist = [p for p in self.engine.history(ticker) if p.ts <= now]
+        if len(hist) < 2:
+            return None
+        start = [p for p in hist if p.ts >= now - timedelta(seconds=window)]
+        if not start or (hist[-1].ts - start[0].ts).total_seconds() < window * 0.8:
+            return None
+        return hist[-1].mid - start[0].mid
+
+    async def btc_decision(self, snap: MarketSnapshot, now: datetime | None = None,
+                           spot: Any = None) -> BTCSignal:
+        now = now or utcnow()
+        terms = interpret_contract(snap.info, require_rules=self.settings.require_settlement_rules)
+        feed = self.underlying
+        if spot is None and self.settings.btc_spot_source == "index" and not self.fixture_mode:
+            spot = await self.settlement_index.latest(self.client, snap.info.event_ticker, now)
+        if spot is None:
+            spot = await feed.get_price("BTC")
+        bars_fn = getattr(feed, "bars", None)
+        bars = bars_fn() if callable(bars_fn) else []
+        t_left = snap.time_remaining(now)
+        price = spot.price if spot is not None else None
+        feats = compute_btc_features(bars, price, now, self.btc_cfg, terms.threshold, t_left,
+                                     terms.averaging_window_sec)
+        est = estimate_probability(terms, price, bars, now, t_left, self.btc_cfg)
+        book = snap.orderbook is not None
+        paused = self.adaptive.reason if self.adaptive.mode == "PAUSED" else ""
+        inp = BTCInputs(
+            now=now, terms=terms, features=feats, regime=classify_regime(feats, self.btc_cfg), estimate=est,
+            yes_ask=snap.yes_ask, no_ask=snap.no_ask, yes_bid=snap.yes_bid, no_bid=snap.no_bid, t_left_sec=t_left,
+            kalshi_ts=snap.ts, btc_ts=spot.ts if spot is not None else None,
+            liquidity={"yes": snap.ask_liquidity("yes") if book else None,
+                       "no": snap.ask_liquidity("no") if book else None},
+            kalshi_move_5m=self._kalshi_move(snap.ticker, now),
+            calibration=self.calibration.state if self.calibration else UNCALIBRATED,
+            paused_reason=paused, live=self.state.mode == "live",
+        )
+        return decide(inp, self.btc_params())
 
     # -------------------------------------------------------------- research
     def _build_model(self) -> HistoricalModel:
+        if self.btc_mode:
+            self.calibration = calibration_report(self.repo.observations(source="btc"),
+                                                  self.settings.hist_min_samples, self.settings.calibration_ece_tol)
         return HistoricalModel(
             self.repo.observations(source="live"), self.settings.hist_min_samples,
             self.settings.calibration_prior_strength, self.settings.fee_rate, self.settings.paper_slippage_cents,
@@ -332,6 +517,14 @@ class BotRuntime:
         self._obs_keys.add((obs.ticker, obs.minute))
         return self.repo.add_observation(obs)
 
+    def record_btc_observation(self, btc: BTCSignal, snap: MarketSnapshot, now: datetime | None = None) -> bool:
+        now = now or utcnow()
+        obs = from_btc_signal(btc, snap, now)
+        if obs is None or ("btc:" + obs.ticker, obs.minute) in self._obs_keys:
+            return False
+        self._obs_keys.add(("btc:" + obs.ticker, obs.minute))
+        return self.repo.add_observation(obs)
+
     async def label_observations(self, now: datetime | None = None) -> int:
         """Attach real market results to observations of closed markets (never guessed)."""
         now = now or utcnow()
@@ -345,7 +538,7 @@ class BotRuntime:
             result = str(raw.get("result") or "")
             if result in ("yes", "no"):
                 labelled += self.repo.label_observations(ticker, result)
-        self._obs_keys = {k for k in self._obs_keys if k[0] in self.discovery.state.by_ticker}
+        self._obs_keys = {k for k in self._obs_keys if k[0].removeprefix("btc:") in self.discovery.state.by_ticker}
         return labelled
 
     def update_adaptive(self) -> AdaptiveState:
@@ -374,8 +567,9 @@ class BotRuntime:
     def make_ticket(self, sig: SignalResult, decision: RiskDecision, snap: MarketSnapshot,
                     origin: str = "manual") -> TradeTicket:
         assert decision.approved and decision.side and decision.limit_price_cents is not None
+        direction = sig.btc.leaning if sig.btc is not None else sig.leaning.value
         return self.tickets.add(TradeTicket(
-            ticker=snap.ticker, label=snap.info.label, side=decision.side, direction=sig.leaning.value,
+            ticker=snap.ticker, label=snap.info.label, side=decision.side, direction=direction,
             contracts=decision.position_size, limit_price_cents=decision.limit_price_cents,
             quoted_price_cents=decision.price_cents or decision.limit_price_cents,
             cost_usd=decision.cost_usd, fee_usd=decision.fee_usd, risk_level=decision.risk_level.value,
@@ -411,9 +605,21 @@ class BotRuntime:
             est = self.estimate_for(sig, snap)
             entry["p_model"] = est.p_model if est and est.p_model is not None else pos.entry_price / 100
             entry["ev_cents"] = est.ev_cents if est else None
+            if sig.btc is not None and sig.btc.edge is not None:
+                b = sig.btc
+                entry["p_model"] = b.edge.p_point
+                entry["ev_cents"] = b.edge.ev_cents
+                entry["btc"] = {
+                    "p_low": b.edge.p_low, "ev_low_cents": b.edge.ev_low_cents, "ask": b.edge.ask,
+                    "cost_cents": b.edge.cost_cents, "strength": b.strength, "regime": b.regime.value,
+                    "calibration": b.calibration.status, "threshold": b.terms.threshold,
+                    "spot": b.features.spot, "dist_sigma": b.features.dist_sigma,
+                    "warnings": list(b.warnings), "risk_level": self.state.risk_level.value,
+                }
+            entry["direction"], entry["why"] = self._card_read(sig, pos)
             self.repo.save_trade_context(pos.id, pos.ticker, entry=entry)
         self.repo.add_event("TRADE_OPENED", f"{pos.mode} {pos.ticker} {pos.side} x{pos.contracts}@{pos.entry_price}")
-        await self.notify("trade_opened", f"open:{pos.id}", messages.trade_opened_alert(pos))
+        await self.notify("trade_opened", f"open:{pos.id}", messages.trade_opened_alert(pos, *self._card_meta(pos)))
         return pos
 
     async def close_position(self, position_id: int, *, confirmed: bool) -> float:
@@ -428,6 +634,29 @@ class BotRuntime:
         await self._after_close(pos)
         return pnl
 
+    @staticmethod
+    def _card_read(sig: SignalResult, pos: Position) -> tuple[str, str]:
+        """UP/DOWN meaning of the bought side and a one-line reason, for the trade cards."""
+        b = sig.btc
+        if b is not None and b.terms.kind is not None:
+            direction = b.terms.direction_for_side(pos.side)
+            if b.edge is not None:
+                return direction, (f"bot's estimate {b.edge.p_low * 100:.0f}%+ vs price {b.edge.ask:.0f}¢ "
+                                   f"(estimate, not a guarantee)")
+            return direction, ""
+        direction = "UP" if pos.side == "yes" else "DOWN"
+        top = next((r.text for r in sig.reasons if r.positive), "")
+        return direction, top
+
+    def _card_meta(self, pos: Position, with_summary: bool = False) -> tuple:
+        ctx = self.repo.trade_context(pos.id) if pos.id is not None else None
+        entry = (ctx or {}).get("entry", {})
+        direction = entry.get("direction") or ("UP" if pos.side == "yes" else "DOWN")
+        why = entry.get("why") or ""
+        if with_summary:
+            return direction, why, (ctx or {}).get("summary") or ""
+        return direction, why
+
     def _analyze_close(self, pos: Position) -> None:
         if pos.id is None:
             return
@@ -441,7 +670,10 @@ class BotRuntime:
 
     async def _after_close(self, pos: Position) -> None:
         self._analyze_close(pos)
-        await self.notify("trade_closed", f"close:{pos.id}", messages.trade_closed_alert(pos))
+        direction, _why, summary = self._card_meta(pos, with_summary=True)
+        text = messages.trade_closed_alert(pos, direction, summary)
+        if not await self.send_pnl_image("trade_closed", f"close:{pos.id}", text, pos.mode, pos, direction):
+            await self.notify("trade_closed", f"close:{pos.id}", text)
         limit = self.settings.large_loss_alert_usd
         if limit > 0 and (pos.realized_pnl or 0) <= -limit:
             await self.notify("large_loss", f"loss:{pos.id}", messages.large_loss_alert(pos))
@@ -526,6 +758,9 @@ class BotRuntime:
             spot_hist = self.underlying.history(snap.info.asset)
         sig = self.engine.evaluate(snap, threshold=prof.min_confidence, min_quality=prof.min_signal_quality,
                                    threshold_label=prof.level.title, spot=spot, spot_history=spot_hist)
+        if self.btc_mode:
+            sig = replace(sig, btc=await self.btc_decision(snap, spot=spot))
+            self.engine.latest[snap.ticker] = sig
         self._last_signal[snap.ticker] = sig
         return sig
 
@@ -533,27 +768,124 @@ class BotRuntime:
         sig = await self.evaluate_snapshot(snap)
         self._persist(snap, sig)
         self.record_observation(sig, snap)
+        if sig.btc is not None:
+            self.record_btc_observation(sig.btc, snap)
 
         flip = self.engine.detect_flip(sig)
-        if flip:
+        if flip and self.settings.signal_alerts:
             await self.notify("flip", f"flip:{snap.ticker}", messages.flip_alert(flip))
         decision = self.check_risk(sig, snap)
         strong = (decision.approved and sig.grade in ("A+", "A")
                   and sig.confidence >= self.settings.strong_signal_alert_min_confidence)
-        if strong and self._strong.get(snap.ticker) != sig.direction.value:
+        quiet = not self.settings.signal_alerts and self.state.auto_trade
+        if strong and not quiet and self._strong.get(snap.ticker) != sig.direction.value:
             self._strong[snap.ticker] = sig.direction.value
             text, buttons = messages.strong_signal_alert(sig, snap, decision, self.state)
             await self.notify("strong_signal", f"strong:{snap.ticker}:{sig.direction.value}", text, buttons)
         elif not strong and (sig.grade not in ("A+", "A")
                              or sig.confidence < self.settings.strong_signal_alert_min_confidence - 5):
             self._strong.pop(snap.ticker, None)  # hysteresis: re-arm only after it clearly weakens
+        if self.settings.early_exit:
+            await self._manage_exits(sig, snap)
         if self.state.auto_trade and decision.approved:
             await self._auto_trade(sig, snap, decision)
         return sig
 
+    # ------------------------------------------------------------ early exits
+    def exit_reason(self, pos: Position, sig: SignalResult, snap: MarketSnapshot) -> str | None:
+        """Why the open position should be cashed out now, or None. Uses only current data."""
+        s = self.settings
+        bid = snap.exit_price(pos.side)
+        if s.early_exit_stop_loss_pct > 0 and bid is not None and \
+                bid <= pos.entry_price * (1 - s.early_exit_stop_loss_pct / 100):
+            return f"stop-loss: value down {s.early_exit_stop_loss_pct:g}%+"
+        b = sig.btc
+        if b is not None and b.p_yes is not None:
+            p_side = b.p_yes if pos.side == "yes" else 1 - b.p_yes
+            if p_side < s.early_exit_btc_p_side:
+                return f"bot's odds for this side fell to {p_side:.0%}"
+            return None
+        direction = self._card_meta(pos)[0]
+        lean = sig.leaning.value
+        if lean in ("UP", "DOWN") and lean != direction and sig.confidence >= s.early_exit_flip_confidence:
+            return f"signal flipped to {lean} ({sig.confidence}%)"
+        return None
+
+    async def _manage_exits(self, sig: SignalResult, snap: MarketSnapshot) -> None:
+        s = self.settings
+        for pos in [p for p in self.portfolio.open_positions() if p.ticker == snap.ticker and p.id is not None]:
+            reason = self.exit_reason(pos, sig, snap)
+            if reason is None:
+                self._exit_ticks.pop(pos.id, None)
+                continue
+            n = self._exit_ticks[pos.id] = self._exit_ticks.get(pos.id, 0) + 1
+            bid = snap.exit_price(pos.side)
+            if (n < s.early_exit_confirm_ticks or bid is None or bid < s.early_exit_min_bid_cents
+                    or snap.time_remaining() < s.early_exit_min_t_left_sec):
+                continue
+            if pos.mode == "live":
+                if pos.id not in self._exit_suggested:  # never sell real money without a tap
+                    self._exit_suggested.add(pos.id)
+                    await self.notify("exit_suggest", f"exit:{pos.id}",
+                                      messages.exit_suggestion(pos, self._card_meta(pos)[0], reason, bid),
+                                      [[("💰 Sell now", f"pcl:{pos.id}"), ("✋ Keep", "home")]])
+                continue
+            try:
+                await self.executor.close(pos, snap, confirmed=True, reason=f"early exit: {reason}")
+            except TradingError as exc:
+                log_event(log, "EARLY_EXIT_FAILED", logging.WARNING, ticker=pos.ticker, error=exc)
+                continue
+            self._exit_ticks.pop(pos.id, None)
+            self._early_exits.setdefault(pos.ticker, []).append(pos)
+            log_event(log, "EARLY_EXIT", ticker=pos.ticker, side=pos.side, reason=reason, pnl=pos.realized_pnl)
+            await self._after_close(pos)
+
+    @property
+    def _exit_stats_path(self) -> Path:
+        return self.settings.kalshi_key_dir.parent / "early_exit_stats.json"
+
+    def early_exit_stats(self) -> dict[str, float]:
+        try:
+            return json.loads(self._exit_stats_path.read_text())
+        except (OSError, ValueError):
+            return {"exits": 0, "saved": 0.0, "helped": 0, "hurt": 0}
+
+    async def score_early_exits(self, now: datetime | None = None) -> int:
+        """After the market settles, compare each cash-out with simply holding (real result only)."""
+        now = now or utcnow()
+        scored = 0
+        for ticker, plist in list(self._early_exits.items()):
+            close = plist[0].close_time
+            if close is None or now < close + timedelta(seconds=5):
+                continue
+            try:
+                raw = await self.client.get_market(ticker)
+            except KalshiError:
+                continue
+            result = str(raw.get("result") or "")
+            if result not in ("yes", "no"):
+                continue
+            del self._early_exits[ticker]
+            st = self.early_exit_stats()
+            for pos in plist:
+                hold = round(pos.contracts * (100 if result == pos.side else 0) / 100 - pos.cost - pos.entry_fee, 2)
+                saved = round((pos.realized_pnl or 0) - hold, 2)
+                st["exits"] += 1
+                st["saved"] = round(st["saved"] + saved, 2)
+                st["helped" if saved > 0 else "hurt"] += 1 if saved != 0 else 0
+                scored += 1
+                await self.notify("exit_check", f"exitcheck:{pos.id}",
+                                  messages.exit_check(pos, self._card_meta(pos)[0], result, hold, saved, st))
+            try:
+                self._exit_stats_path.parent.mkdir(parents=True, exist_ok=True)
+                self._exit_stats_path.write_text(json.dumps(st))
+            except OSError:
+                log.warning("EARLY_EXIT_STATS_SAVE_FAILED")
+        return scored
+
     async def _auto_trade(self, sig: SignalResult, snap: MarketSnapshot, decision: RiskDecision) -> None:
-        if self.state.mode == "live" and not self.settings.live_autotrade_allowed:
-            return
+        if self.state.mode == "live" and (self.btc_mode or not self.settings.live_autotrade_allowed):
+            return  # BTC engine: every live order needs a manual confirmation
         ticket = self.make_ticket(sig, decision, snap, origin="auto")
         self.tickets.discard(ticket.id)
         try:
@@ -601,6 +933,7 @@ class BotRuntime:
                                      f"settled {result.upper()}", action="SETTLE")
             settled.append(pos)
             await self._after_close(pos)
+        await self.score_early_exits(now)
         return settled
 
     async def _maintenance_loop(self) -> None:

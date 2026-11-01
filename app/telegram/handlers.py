@@ -11,6 +11,7 @@ from telegram.ext import ContextTypes
 from app.telegram import messages as M
 from app.telegram.callbacks import CallbackGuard, CallbackRouter
 from app.telegram.dashboard import DashboardManager
+from app.telegram.keysetup import KeySetup
 from app.utils.logging import log_event
 
 log = logging.getLogger(__name__)
@@ -20,8 +21,11 @@ COMMAND_ROUTES = {
     "start": "home", "menu": "home", "status": "status", "markets": "signals", "signals": "signals",
     "risk": "risk", "config": "cfg", "positions": "pos", "trades": "trades:0", "pnl": "pnl",
     "history": "hist:today", "strategy": "strat", "pause": "pause", "resume": "resume", "stop": "stop",
-    "estop": "estop",
+    "estop": "estop", "account": "kacct", "btc": "btc", "analytics": "banl", "backtest": "bt", "calibration": "bcal",
 }
+
+
+KEY_COMMANDS = ("setkey", "removekey", "cancel")
 
 
 class Handlers:
@@ -29,6 +33,7 @@ class Handlers:
         self.router = router
         self.dashboard = dashboard
         self.guard = CallbackGuard()
+        self.keys = KeySetup(router.rt)
 
     async def command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         msg, user = update.effective_message, update.effective_user
@@ -36,11 +41,25 @@ class Handlers:
             return
         cmd = msg.text.split()[0].lstrip("/").split("@")[0].lower()
         uid = user.id if user else None
+        if await self.keys.scrub(msg) and cmd != "setkey":
+            await msg.chat.send_message("🫥 That looked like a private key, so I deleted it. Use /setkey.")
+            return
         if not self.router.is_admin(uid):
             log_event(log, "UNAUTHORIZED_COMMAND", logging.WARNING, user=uid, cmd=cmd[:20])
             await msg.reply_text(M.unauthorized().text)
             return
         assert uid is not None
+        if cmd == "pnl" and self.router.rt.settings.pnl_image:
+            from app import DISPLAY_NAME
+            from app.telegram.pnl_dashboard import render_dashboard
+
+            rt = self.router.rt
+            png = render_dashboard(rt.pnl_dashboard(rt.state.mode), DISPLAY_NAME)
+            await msg.reply_photo(png, caption="📊 Today's P&L")
+            return
+        if cmd in KEY_COMMANDS:
+            await self.keys.command(msg, uid, cmd)
+            return
         if cmd == "help":
             await msg.reply_text(M.help_text(), parse_mode=ParseMode.HTML)
             return
@@ -86,15 +105,29 @@ class Handlers:
         if msg is None or uid is None or not self.router.is_admin(uid):
             return
         chat_id = msg.chat.id
+        if resp.start_key_setup:
+            await self.keys.start(msg.chat, uid)
+            return
         if resp.clear:
             await self.dashboard.clear(chat_id)
         if resp.screen:
             await self.dashboard.show(chat_id, uid, resp.screen, message_id=msg.message_id)
 
     async def text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        user = update.effective_user
-        if update.effective_message and user and self.router.is_admin(user.id):
-            await update.effective_message.reply_text("Use /menu to open the dashboard.")
+        """Plain messages and files. Anything that may contain key material is deleted first."""
+        msg, user = update.effective_message, update.effective_user
+        if msg is None:
+            return
+        admin = bool(user and self.router.is_admin(user.id))
+        if admin and await self.keys.message(msg, user.id):  # type: ignore[union-attr]
+            return
+        if await self.keys.scrub(msg):
+            if admin:
+                await msg.chat.send_message("🫥 That looked like a private key, so I deleted it. "
+                                            "To connect Kalshi, send /setkey first.")
+            return
+        if admin and msg.text:
+            await msg.reply_text("Use /menu to open the dashboard.")
 
     async def error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         log.error("TELEGRAM_HANDLER_ERROR error=%r", context.error, exc_info=context.error)

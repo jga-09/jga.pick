@@ -61,8 +61,8 @@ def check(cond: bool, label: str) -> None:
 async def main() -> None:
     setup_logging("WARNING")
     clock = {"now": utcnow()}
-    settings = Settings(_env_file=None, data_source="fixture", database_url="sqlite://",
-                        telegram_admin_ids=str(ADMIN), paper_starting_balance=1000)
+    settings = Settings(_env_file=None, data_source="fixture", database_url="sqlite://", strategy_mode="quality",
+                        assets="BTC,ETH,SOL", telegram_admin_ids=str(ADMIN), paper_starting_balance=1000)
     client = FixtureKalshiClient(clock=lambda: clock["now"])
     repo = Repository(Database(settings.database_url))
     repo.init()
@@ -169,7 +169,110 @@ async def main() -> None:
     show("HOME (final)", M.home(rt))
     unauth = await router.handle(999, "start")
     check("Unauthorized" in (unauth.toast or ""), "Unauthorized user is refused")
+    await btc_section()
     print("\n🎉 SMOKE TEST PASSED")
+
+
+async def btc_section() -> None:
+    """STRATEGY_MODE=btc: dashboard, signal card, NO TRADE reasons, approved paper trade, settlement."""
+    import math
+    from dataclasses import replace as dc_replace
+
+    from app.data.btc_feed import MinuteBar
+    from app.data.underlying import SpotPrice
+    from app.kalshi.market_data import MarketSnapshot, OrderBook
+    from app.research.btc_calibration import CalibrationReport
+    from app.strategy.btc_decision import CalibrationState
+
+    print("\n" + "=" * 20 + " BTC ENGINE (STRATEGY_MODE=btc, synthetic data) " + "=" * 20)
+    clock = {"now": utcnow()}
+    end = clock["now"].replace(second=0, microsecond=0)
+
+    class Feed:  # synthetic BTC: ~60,300 with 5 bps/min noise, i.e. 50 bps above a 60,000 threshold
+        name = "smoke"
+        _bars = [MinuteBar(end - timedelta(minutes=119 - i), *(4 * [60300 * math.exp((5 if i % 2 else -5) / 1e4)]), 10.0)
+                 for i in range(120)]
+
+        async def get_price(self, asset):  # type: ignore[no-untyped-def]
+            return SpotPrice("BTC", 60300.0, clock["now"], "smoke")
+
+        def history(self, asset):  # type: ignore[no-untyped-def]
+            return []
+
+        def bars(self):  # type: ignore[no-untyped-def]
+            return self._bars
+
+        def status(self):  # type: ignore[no-untyped-def]
+            from app.data.btc_feed import FeedStatus
+            return FeedStatus("FIXTURE", "synthetic", clock["now"], 0.0)
+
+        async def close(self) -> None:
+            return None
+
+    settings = Settings(_env_file=None, data_source="fixture", database_url="sqlite://", telegram_admin_ids=str(ADMIN))
+    repo = Repository(Database("sqlite://"))
+    repo.init()
+    rt = BotRuntime(settings, repo, FixtureKalshiClient(clock=lambda: clock["now"]), underlying=Feed(),
+                    profiles=load_profiles(read_env=False))
+    router = CallbackRouter(rt, settings.admin_ids)
+    await router.handle(ADMIN, "start")
+    for t in rt._tasks:
+        t.cancel()
+    rt._tasks.clear()
+    now = clock["now"]
+    info = MarketInfo(ticker="KXBTC15M-SMOKE", event_ticker="KXBTC15M-SMOKE", series_ticker="KXBTC15M", asset="BTC",
+                      title="Bitcoin price above 60,000?", subtitle="", open_time=now - timedelta(seconds=360),
+                      close_time=now + timedelta(seconds=540), expiration_time=None, status="active",
+                      floor_strike=60000.0, strike_type="greater_or_equal",
+                      rules_primary="[SMOKE] If the simple average of the sixty seconds of CF Benchmarks' Bitcoin "
+                                    "Real-Time Index (BRTI) before close is above 60000.00, the market resolves to Yes.")
+    rt.discovery.state.current["BTC"] = info
+    rt.discovery.state.by_ticker[info.ticker] = info
+
+    def snap(ask: float, bid: float) -> MarketSnapshot:
+        book = OrderBook(yes_bids=((bid, 200.0),), no_bids=((100 - ask, 200.0),))
+        return MarketSnapshot(info=info, ts=clock["now"], yes_bid=bid, yes_ask=ask, no_bid=100 - ask, no_ask=100 - bid,
+                              orderbook=book)
+
+    # a) Uncalibrated model under LOW: NO TRADE with the exact reason.
+    s1 = snap(70, 68)
+    rt.market_data.latest[info.ticker] = s1
+    await rt.process_snapshot(s1)
+    d = rt.view(info.ticker).decision
+    check(not d.approved, f"LOW + uncalibrated model -> NO TRADE: {d.reason}")
+    show("BTC DASHBOARD", M.home(rt))
+
+    # b) Price already near certainty: insufficient remaining value.
+    rt.store.update(risk_level=RiskLevel.HIGH)
+    s2 = snap(97, 95)
+    rt.market_data.latest[info.ticker] = s2
+    await rt.process_snapshot(s2)
+    d = rt.view(info.ticker).decision
+    check(not d.approved and any(k in d.reason.lower() for k in ("expected value", "reflects the move")),
+          f"97c entry rejected: {d.reason}")
+
+    # c) Calibrated model, cheap YES: approved -> paper trade.
+    rt.calibration = CalibrationReport(CalibrationState("CALIBRATED", 120, 0.02, 0.20, 0.21), (), 120, 900)
+    s3 = snap(70, 68)
+    rt.market_data.latest[info.ticker] = s3
+
+    async def fresh(_info):  # type: ignore[no-untyped-def]
+        rt.market_data.latest[info.ticker] = dc_replace(s3, ts=clock["now"])
+        return rt.market_data.latest[info.ticker]
+
+    rt.market_data.poll = fresh  # type: ignore[method-assign]
+    await rt.process_snapshot(s3)
+    d = rt.view(info.ticker).decision
+    check(d.approved, f"Calibrated model + 70c YES approved: {d.position_size} contracts")
+    show("BTC SIGNAL", (await router.handle(ADMIN, "btc")).screen)
+    resp = await router.handle(ADMIN, f"buy:{info.ticker}")
+    tid = next(data.split(":")[1] for row in resp.screen.buttons for _, data in row if data.startswith("tok:"))
+    resp = await router.handle(ADMIN, f"tok:{tid}")
+    pos = rt.portfolio.open_positions("paper")
+    check(len(pos) == 1, f"Paper trade filled: {pos[0].side.upper()} x{pos[0].contracts} @ {pos[0].entry_price:.0f}c")
+    pnl = rt.paper.settle(pos[0], "yes")
+    check(pnl > 0, f"Settled YES -> paper P&L {M.money(pnl)} (synthetic)")
+    show("BTC ANALYTICS", (await router.handle(ADMIN, "banl")).screen)
 
 
 if __name__ == "__main__":
