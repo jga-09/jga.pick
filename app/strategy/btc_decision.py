@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 
+from app.trading.fees import estimate_fee
 from app.kalshi.contract import ContractTerms
 from app.strategy.btc_model import BTCFeatures, BTCRegime, ProbabilityEstimate
 
@@ -193,8 +194,15 @@ class BTCSignal:
 
 
 def fee_cents(price_cents: float, rate: float) -> float:
+    """Unrounded fee per contract (cents) - an average over large orders."""
     p = price_cents / 100
     return rate * p * (1 - p) * 100
+
+
+def order_fee_cents(price_cents: float, rate: float, contracts: int = 1) -> float:
+    """Kalshi's actual fee per contract (cents): rounded UP to the cent per order. With 1 contract this is the
+    worst case, so the screen's edge is conservative; the risk manager re-checks with the real order size."""
+    return estimate_fee(contracts, price_cents, rate) * 100 / contracts
 
 
 def side_edges(inp: BTCInputs, prm: BTCParams) -> list[SideEdge]:
@@ -203,7 +211,7 @@ def side_edges(inp: BTCInputs, prm: BTCParams) -> list[SideEdge]:
         probs = inp.estimate.p_side(side)
         if ask is None or not 1 <= ask <= 99 or probs is None:
             continue
-        cost = ask + prm.slippage_cents + fee_cents(ask, prm.fee_rate)
+        cost = ask + prm.slippage_cents + order_fee_cents(ask, prm.fee_rate)
         p, lo, _ = probs
         out.append(SideEdge(side, ask, cost, p, lo, p * 100 - cost, lo * 100 - cost))
     return out

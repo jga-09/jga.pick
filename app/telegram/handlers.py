@@ -22,6 +22,9 @@ COMMAND_ROUTES = {
     "risk": "risk", "config": "cfg", "positions": "pos", "trades": "trades:0", "pnl": "pnl",
     "history": "hist:today", "strategy": "strat", "pause": "pause", "resume": "resume", "stop": "stop",
     "estop": "estop", "account": "kacct", "btc": "btc", "analytics": "banl", "backtest": "bt", "calibration": "bcal",
+    # upgrade: per-asset cards, periods, orders, models, kill switch
+    "eth": "asset:ETH", "sol": "asset:SOL", "gold": "asset:GOLD", "today": "hist:today", "week": "hist:7d",
+    "month": "hist:30d", "performance": "hist:all", "orders": "orders", "models": "models", "kill": "estop",
 }
 
 

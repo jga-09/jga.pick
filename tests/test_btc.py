@@ -246,7 +246,8 @@ def test_fee_and_ev_formulas() -> None:
     assert estimate_fee(10, 50, 0.07) == 0.18  # ceil(0.175) to the cent
     inp = inputs()
     yes = next(e for e in side_edges(inp, params()) if e.side == "yes")
-    assert yes.cost_cents == pytest.approx(70 + 1 + fee_cents(70, 0.07))
+    # EV uses Kalshi's real per-order fee (rounded up to the cent; 1 contract = worst case): ceil(1.47c) = 2c
+    assert yes.cost_cents == pytest.approx(70 + 1 + 2.0)
     assert yes.ev_cents == pytest.approx(yes.p_point * 100 - yes.cost_cents)
     assert yes.ev_low_cents <= yes.ev_cents
 

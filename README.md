@@ -341,6 +341,50 @@ separate, fees, profit factor, drawdown, streaks, calibration), **🧪 Backtest*
 text (a 60-second average is assumed and reported). All thresholds are a-priori defaults. Change them only
 when out-of-sample backtests and paper results support it.
 
+## 15d. Advanced upgrade: per-asset models, Gold research, live-order safety
+
+See `docs/AUDIT.md` for everything found and fixed. In short:
+
+- **Per-asset evidence.** The historical model keeps BTC, ETH, SOL and Gold apart. An estimate built from
+  pooled data is labelled `pooled` and can never approve a trade.
+- **Model comparison** (`scripts/model_compare.py`, research only):
+  - Benchmarks: MARKET (Kalshi's own price), FAIR (log-normal fair value) and HIST (the historical-model idea).
+  - Models: logistic regression, random forest, histogram gradient boosting and LightGBM.
+  - Features: Kalshi price/spread/momentum, EMA, RSI, MACD, Bollinger, ATR, session VWAP, volume acceleration
+    and realised volatility, all computed only from data known at that minute.
+  - Testing: walk-forward (train only on markets closed before the test day), then one look at an untouched
+    holdout. Optional Platt/isotonic calibration on the newest 20% of training data.
+  - Costs: the exact per-order fee (rounded up to the cent) plus slippage.
+  - Reports: Brier, log loss, ECE, calibration, P&L, ROI, profit factor, drawdown and bootstrap 95% ranges,
+    broken down by time left, entry price and volatility regime.
+  ```bash
+  pip install -r requirements-research.txt
+  python scripts/replay.py --days 30 --no-trades
+  python scripts/model_compare.py --assets BTC,ETH,SOL
+  ```
+- **Gold** (`GOLD_ENABLED=true`, research only, **never traded**):
+  - Series are found from Kalshi's own `/series` list; no ticker is assumed.
+  - Each contract's rules must name gold/XAU, a single threshold and a settlement source that matches the
+    price feed (Pyth XAU/USD).
+  - Stale prices and closed sessions show as unavailable.
+  - `python scripts/gold_check.py` confirms the series, the rules and the Pyth feed id.
+    `python scripts/gold_check.py --days 30` downloads settled Gold markets and compares a pricing model with
+    Kalshi's own prices.
+  - The risk manager refuses every GOLD trade.
+- **Live orders:**
+  - Fills, prices and fees are read back from Kalshi (`/portfolio/fills`).
+  - Every exit attempt gets a new order id.
+  - Partial exits book their P&L and fees.
+  - Uncertain orders are looked up by client_order_id and never resubmitted.
+  - Leftover orders are recovered after a crash.
+  - Positions are checked against Kalshi at startup and every 5 minutes; mismatched markets are blocked and
+    alerted.
+  - The emergency stop (`/kill`) blocks new orders but still lets you exit with a confirmation.
+  - The bot always boots in PAPER.
+- **New Telegram commands:** `/eth` `/sol` `/gold` (per-asset cards: model vs market probability, EV after costs,
+  spread, liquidity, sample size and the exact NO TRADE reason), `/today` `/week` `/month` `/performance`,
+  `/orders` (live orders and the Kalshi check), `/models`, `/kill`.
+
 ## 16. Enabling live trading (deliberately)
 
 All of the following are required:

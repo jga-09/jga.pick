@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from app.errors import ConfigError, InvalidCallbackError, TradingError
 from app.risk.profiles import RiskLevel
 from app.runtime import BotRuntime
+from app.telegram import upgrade_views as UV
 from app.telegram import analytics_views as AV
 from app.telegram import btc_views as BV
 from app.telegram import messages as M
@@ -37,7 +38,9 @@ ACTIONS: dict[str, tuple[int, ...]] = {
     "btc": (0,), "bwhy": (1,), "banl": (0,), "bcal": (0,), "bt": (0,),
     "kacct": (0,), "keyset": (0,), "keydel": (0,),
     "clear": (0,), "estop": (0,), "estopok": (0,), "ereset": (0,), "eresetok": (0,), "pnl": (0,),
+    "asset": (1,), "orders": (0,), "models": (0,),
 }
+CARD_ASSETS = ("BTC", "ETH", "SOL", "XRP", "DOGE", "GOLD")
 
 
 @dataclass
@@ -163,6 +166,20 @@ class CallbackRouter:
 
     async def _on_feat(self, uid: int) -> Response:
         return Response(await asyncio.to_thread(AV.features, self.rt))
+
+    async def _on_asset(self, uid: int, asset: str) -> Response:
+        asset = asset.upper()
+        if asset not in CARD_ASSETS:
+            raise InvalidCallbackError("unknown asset")
+        if asset == "GOLD":
+            await self.rt.refresh_gold()
+        return Response(UV.asset_card(self.rt, asset))
+
+    async def _on_orders(self, uid: int) -> Response:
+        return Response(UV.orders(self.rt))
+
+    async def _on_models(self, uid: int) -> Response:
+        return Response(await asyncio.to_thread(UV.models, self.rt))
 
     async def _on_btc(self, uid: int) -> Response:
         return Response(BV.signal(self.rt))
