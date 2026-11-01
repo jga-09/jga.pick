@@ -140,6 +140,17 @@ class Repository:
                 for k, v in kw.items():
                     setattr(row, k, v)
 
+    def live_orders(self, statuses: tuple[str, ...] | None = None, limit: int = 500) -> list[dict[str, Any]]:
+        """Live order rows (newest first), optionally filtered by status - used for crash recovery."""
+        with self.db.session() as s:
+            q = select(LiveOrderRow).order_by(LiveOrderRow.id.desc()).limit(limit)
+            if statuses:
+                q = q.where(LiveOrderRow.status.in_(statuses))
+            return [{"client_order_id": r.client_order_id, "ticker": r.ticker, "side": r.side, "action": r.action,
+                     "contracts": r.contracts, "price": r.price, "fee": r.fee, "status": r.status,
+                     "position_id": r.position_id, "exchange_order_id": r.exchange_order_id,
+                     "created_at": r.created_at, "error": r.error} for r in s.scalars(q)]
+
     # ----------------------------------------------------------- positions
     def save_position(self, p: Position) -> int:
         with self.db.session() as s:

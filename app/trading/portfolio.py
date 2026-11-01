@@ -169,6 +169,8 @@ class Portfolio:
         return p
 
     def close(self, p: Position, exit_price: float, exit_fee: float, reason: str, action: str = "SELL") -> float:
+        if not p.is_open:  # e.g. settlement racing a manual/early exit: never book P&L twice
+            raise ValueError(f"position {p.id} on {p.ticker} is already closed")
         pnl = p.close(exit_price, exit_fee, reason)
         self.repo.save_position(p)
         self.repo.add_trade(position_id=p.id, mode=p.mode, ticker=p.ticker, action=action, side=p.side,
@@ -178,4 +180,30 @@ class Portfolio:
             self.last_loss_at = p.closed_at
         self.positions.pop(p.id, None)  # type: ignore[arg-type]
         log_event(log, "POSITION_CLOSED", mode=p.mode, ticker=p.ticker, pnl=pnl, reason=reason)
+        return pnl
+
+    def close_partial(self, p: Position, contracts: int, exit_price: float, exit_fee: float, reason: str) -> float:
+        """Book a partial exit: the sold contracts become their own closed position (trade row, realized
+        P&L, fees and daily P&L all recorded); the open position keeps the rest and its share of the entry fee."""
+        if not p.is_open or not 0 < contracts < p.contracts:
+            raise ValueError(f"invalid partial exit of {contracts}/{p.contracts} on {p.ticker}")
+        share = contracts / p.contracts
+        part_fee = round(p.entry_fee * share, 4)
+        part = Position(mode=p.mode, ticker=p.ticker, event_ticker=p.event_ticker, asset=p.asset, label=p.label,
+                        side=p.side, contracts=contracts, entry_price=p.entry_price, entry_fee=part_fee,
+                        risk_level=p.risk_level, confidence=p.confidence, close_time=p.close_time,
+                        opened_at=p.opened_at, client_order_id=p.client_order_id)
+        self.repo.save_position(part)
+        pnl = part.close(exit_price, exit_fee, reason + " (partial)")
+        self.repo.save_position(part)
+        self.repo.add_trade(position_id=part.id, mode=p.mode, ticker=p.ticker, action="SELL", side=p.side,
+                            contracts=contracts, price=exit_price, fee=exit_fee, ts=part.closed_at)
+        self.repo.record_daily(p.mode, pnl, part_fee + exit_fee, part.won, part.closed_at)
+        if pnl <= 0:
+            self.last_loss_at = part.closed_at
+        p.contracts -= contracts
+        p.entry_fee = round(p.entry_fee - part_fee, 4)
+        self.repo.save_position(p)
+        log_event(log, "POSITION_PARTIAL_CLOSE", mode=p.mode, ticker=p.ticker, sold=contracts, left=p.contracts,
+                  pnl=pnl)
         return pnl

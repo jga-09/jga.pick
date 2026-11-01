@@ -87,8 +87,13 @@ async def test_live_executor_requires_confirmation_and_builds_v2_order(repo):
     client.create_order_v2 = AsyncMock(return_value={
         "order_id": "o1", "fill_count": "5.00", "remaining_count": "0.00", "average_fill_price": "0.3800",
         "average_fee_paid": "0.0200", "ts_ms": 1})
+    from app.errors import KalshiTransientError
+
+    client.get_fills = AsyncMock(side_effect=KalshiTransientError("down"))  # falls back to the POST reply
+    client.get_order = AsyncMock(side_effect=KalshiTransientError("down"))
     settings = make_settings(data_source="kalshi", live_trading=True, paper_trading=False)
     live = LiveExecutor(client, settings, Portfolio(repo, 1000))
+    live.retry_delay = 0
     t = ticket(mode="live", side="no", direction="DOWN", limit_price_cents=64)
     with pytest.raises(LiveTradingDisabledError, match="confirmation"):
         await live.buy(t, quote_snapshot(make_info()), confirmed=False)
@@ -182,10 +187,14 @@ async def _live_with(repo, get_orders):  # type: ignore[no-untyped-def]
     client = MagicMock()
     client.signer = object()
     client.create_order_v2 = AsyncMock(side_effect=KalshiTransientError("timeout on /portfolio/events/orders"))
-    client.get_orders = get_orders
+    client.get_orders_all = get_orders
+    client.get_fills = AsyncMock(return_value=[])
+    client.get_order = AsyncMock(side_effect=KalshiTransientError("down"))
     settings = make_settings(data_source="kalshi", live_trading=True, paper_trading=False)
     portfolio = Portfolio(repo, 1000)
-    return LiveExecutor(client, settings, portfolio), client, portfolio
+    live = LiveExecutor(client, settings, portfolio)
+    live.retry_delay = 0
+    return live, client, portfolio
 
 
 async def test_live_timeout_reconciles_filled_order_without_resubmitting(repo, monkeypatch):

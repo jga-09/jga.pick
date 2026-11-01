@@ -91,7 +91,7 @@ def paper_simulation(world: str, n_markets: int, seed: int = 11, refit_every: in
             if sig.analysis is None or side is None or price is None:
                 continue
             est = model.estimate(sig.analysis.grade, sig.analysis.regime.value, sig.analysis.time_bucket,
-                                 side, price)
+                                 side, price, asset=snap.info.asset)
             day = snap.ts.strftime("%Y-%m-%d")
             for lvl in levels:
                 if lvl in traded:

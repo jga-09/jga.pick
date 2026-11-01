@@ -10,6 +10,12 @@ Design choices that keep this honest:
   model cannot trade on noise.
 * A condition is only declared "historically poor" when the *upper* bound of
   its win-rate interval is still below its break-even price.
+* Assets are kept apart. Each asset (BTC, ETH, SOL, Gold, ...) gets its own
+  sub-model built ONLY from its own observations, and ``estimate(asset=...)``
+  answers from that sub-model alone. Observations from one asset can never
+  decide another asset's trades. A pooled (all-asset) view still exists for
+  dashboards, but any estimate drawn from it is labelled ``scope="pooled"`` and
+  is never ``sufficient`` - it cannot approve a trade.
 """
 
 from __future__ import annotations
@@ -91,6 +97,7 @@ class HistEstimate:
     ev_low_cents: float | None
     sufficient: bool
     poor: tuple[str, ...] = ()
+    scope: str = ""  # "asset:BTC" = this asset's own history; "pooled" = all assets (never sufficient)
 
     @property
     def ev_dollars(self) -> float | None:
@@ -104,11 +111,36 @@ class HistoricalModel:
     prior_strength: float = 20.0
     fee_rate: float = 0.07
     slippage: float = 1.0
+    asset: str | None = None  # set on per-asset sub-models; None = the root (pooled) model
     groups: dict[tuple, GroupStat] = field(default_factory=dict)
+    assets: dict[str, HistoricalModel] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.obs = [o for o in self.observations if o.won is not None and o.entry_price is not None]
+        if self.asset is not None:
+            self.obs = [o for o in self.obs if _asset_of(o) == self.asset]
         self._build()
+        if self.asset is None:
+            by_asset: dict[str, list[Observation]] = defaultdict(list)
+            for o in self.obs:
+                by_asset[_asset_of(o)].append(o)
+            self.assets = {a: HistoricalModel(rows, self.min_samples, self.prior_strength, self.fee_rate,
+                                              self.slippage, asset=a) for a, rows in by_asset.items()}
+
+    @property
+    def scope(self) -> str:
+        return f"asset:{self.asset}" if self.asset is not None else "pooled"
+
+    def for_asset(self, asset: str | None) -> HistoricalModel:
+        """This asset's own sub-model (empty if it has no history). ``None`` = root.
+
+        A root built from a single asset's data answers for that asset (legacy single-asset research)."""
+        if self.asset is not None or asset is None:
+            return self
+        key = asset.upper()
+        if key in self.assets:
+            return self.assets[key]
+        return HistoricalModel([], self.min_samples, self.prior_strength, self.fee_rate, self.slippage, asset=key)
 
     # ------------------------------------------------------------- building
     def _add(self, key: tuple, members: list[Observation]) -> None:
@@ -152,7 +184,21 @@ class HistoricalModel:
         return st.n_markets if st else 0
 
     def estimate(self, grade: str, regime: str, tbucket: str, side: str, price: float,
-                 time_bucket_label: str | None = None) -> HistEstimate:
+                 time_bucket_label: str | None = None, asset: str | None = None) -> HistEstimate:
+        """Similar-setup estimate. Pass ``asset`` (always, in the bot): the answer then comes only from that
+        asset's own observations. Without it, a multi-asset root answers with a pooled, non-sufficient view."""
+        if asset is not None and self.asset is None:
+            return self.for_asset(asset).estimate(grade, regime, tbucket, side, price, time_bucket_label)
+        if self.asset is None and len(self.assets) == 1:  # all data is one asset: that IS asset-specific
+            only = next(iter(self.assets.values()))
+            return only.estimate(grade, regime, tbucket, side, price, time_bucket_label)
+        est = self._estimate(grade, regime, tbucket, side, price)
+        if self.asset is None:  # pooled across assets: informative only, never approves a trade
+            from dataclasses import replace
+            return replace(est, sufficient=False, scope="pooled")
+        return est
+
+    def _estimate(self, grade: str, regime: str, tbucket: str, side: str, price: float) -> HistEstimate:
         poor = self.poor_conditions(regime, tbucket, side, price, grade)
         for level, key in (("grade+regime+time", ("grade_regime_time", grade, regime, tbucket)),
                            ("grade+regime", ("grade_regime", grade, regime)),
@@ -166,10 +212,11 @@ class HistoricalModel:
                 ev = edge * 100 - costs
                 ev_low = (edge - 1.28 * st.edge_se * shrink) * 100 - costs
                 return HistEstimate(level, st.n_markets, st.n_obs, st.win_rate, st.edge, edge,
-                                    min(0.99, max(0.01, price / 100 + edge)), ev, ev_low, True, poor)
+                                    min(0.99, max(0.01, price / 100 + edge)), ev, ev_low, True, poor, self.scope)
         any_st = self.groups.get(("grade", grade))
         return HistEstimate("none", any_st.n_markets if any_st else 0, any_st.n_obs if any_st else 0,
-                            any_st.win_rate if any_st else None, None, None, None, None, None, False, poor)
+                            any_st.win_rate if any_st else None, None, None, None, None, None, False, poor,
+                            self.scope)
 
     def poor_conditions(self, regime: str, tbucket: str, side: str, price: float, grade: str) -> tuple[str, ...]:
         out = []
@@ -190,6 +237,10 @@ class HistoricalModel:
         if not rows:
             return None
         return (min if worst else max)(rows, key=lambda s: s.ev_cents)
+
+
+def _asset_of(o: Observation) -> str:
+    return (o.asset or "UNKNOWN").upper()
 
 
 def _bucket(v: float, edges: Iterable[tuple[int, int]]) -> str:

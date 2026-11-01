@@ -11,7 +11,12 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 
-from app.errors import DuplicateOrderError, LiveTradingDisabledError, OrderRejectedError, TradingDisabledError
+from app.errors import (
+    DuplicateOrderError,
+    LiveTradingDisabledError,
+    OrderRejectedError,
+    TradingDisabledError,
+)
 from app.kalshi.market_data import MarketSnapshot
 from app.risk.manager import RiskDecision
 from app.state import StateStore
@@ -84,6 +89,9 @@ class TradeExecutor:
                   price=pos.entry_price, origin=ticket.origin)
         return pos
 
+    def lock_for(self, ticker: str) -> asyncio.Lock:
+        return self._locks.setdefault(ticker, asyncio.Lock())
+
     async def close(self, pos: Position, snap: MarketSnapshot, *, confirmed: bool, reason: str = "manual exit") -> float:
         if not pos.is_open:
             raise DuplicateOrderError("position already closed")
@@ -92,8 +100,8 @@ class TradeExecutor:
             raise DuplicateOrderError("an order for this market is already in flight")
         async with lock:
             if pos.mode == "live":
-                if self.state.state.emergency_stop:
-                    raise TradingDisabledError("EMERGENCY STOP active - orders blocked")
+                # Emergency stop blocks NEW exposure only. A confirmed, reduce-only exit lowers risk, so it is
+                # allowed while stopped (otherwise you could not get out of a position during an emergency).
                 if self.live is None:
                     raise LiveTradingDisabledError("live executor not configured")
                 return await self.live.sell(pos, snap, reason, confirmed=confirmed)

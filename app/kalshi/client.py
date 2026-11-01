@@ -192,6 +192,54 @@ class KalshiClient:
         """GET /portfolio/orders for one market (used to reconcile orders with an unknown outcome)."""
         return _list(await self._get("/portfolio/orders", {"ticker": ticker, "limit": limit}, auth=True), "orders")
 
+    async def get_order(self, order_id: str) -> dict[str, Any]:
+        """GET /portfolio/orders/{order_id}: the exchange's own view of one order (status, fills, fees)."""
+        data = await self._get(f"/portfolio/orders/{order_id}", auth=True)
+        order = data.get("order")
+        if not isinstance(order, dict):
+            raise MalformedResponseError(f"missing 'order' for {order_id}")
+        return order
+
+    async def get_orders_all(self, ticker: str, *, min_ts: int | None = None,
+                             max_pages: int = 10) -> list[dict[str, Any]]:
+        """Every order on one market (cursor-paged), optionally only those created after ``min_ts``."""
+        out: list[dict[str, Any]] = []
+        cursor: str | None = None
+        for _ in range(max_pages):
+            data = await self._get("/portfolio/orders", {"ticker": ticker, "limit": 200, "min_ts": min_ts,
+                                                         "cursor": cursor}, auth=True)
+            out.extend(_list(data, "orders"))
+            cursor = data.get("cursor") or None
+            if not cursor:
+                break
+        return out
+
+    async def get_fills(self, *, order_id: str | None = None, ticker: str | None = None,
+                        max_pages: int = 10) -> list[dict[str, Any]]:
+        """GET /portfolio/fills (cursor-paged): the executions behind an order, with prices and fees."""
+        out: list[dict[str, Any]] = []
+        cursor: str | None = None
+        for _ in range(max_pages):
+            data = await self._get("/portfolio/fills", {"order_id": order_id, "ticker": ticker, "limit": 200,
+                                                        "cursor": cursor}, auth=True)
+            out.extend(_list(data, "fills"))
+            cursor = data.get("cursor") or None
+            if not cursor:
+                break
+        return out
+
+    async def get_market_positions(self, max_pages: int = 10) -> list[dict[str, Any]]:
+        """All market positions (cursor-paged) from GET /portfolio/positions."""
+        out: list[dict[str, Any]] = []
+        cursor: str | None = None
+        for _ in range(max_pages):
+            data = await self._get("/portfolio/positions", {"limit": 200, "cursor": cursor}, auth=True)
+            out.extend(_list(data, "market_positions"))
+            cursor = data.get("cursor") or None
+            if not cursor:
+                break
+        return out
+
     async def create_order_v2(self, body: dict[str, Any]) -> dict[str, Any]:
         """POST /portfolio/events/orders. Never retried automatically (no double orders)."""
         return await self._request("POST", "/portfolio/events/orders", json=body, auth=True)

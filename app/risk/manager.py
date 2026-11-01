@@ -248,12 +248,13 @@ class RiskManager:
         size = None
         if price is not None:
             limit = min(99.0, price + self.price_buffer_cents)
-            kw: dict[str, Any] = {}
+            # every path: a new stake can never exceed what is left of today's loss limit
+            kw: dict[str, Any] = {
+                "remaining_daily_loss_usd": profile.max_daily_loss_usd + min(0.0, ctx.daily_realized_pnl)}
             if btc_mode and btc is not None and btc.edge is not None:
                 span = max(1, 100 - profile.min_btc_strength)
-                kw = dict(scale=0.5 + 0.5 * min(1.0, max(0.0, (btc.strength - profile.min_btc_strength) / span)),
-                          p_win=btc.edge.p_low,
-                          remaining_daily_loss_usd=profile.max_daily_loss_usd + min(0.0, ctx.daily_realized_pnl))
+                kw.update(scale=0.5 + 0.5 * min(1.0, max(0.0, (btc.strength - profile.min_btc_strength) / span)),
+                          p_win=btc.edge.p_low)
             size = self.sizer.size(
                 profile,
                 price_cents=limit,  # size at the worst-case limit price

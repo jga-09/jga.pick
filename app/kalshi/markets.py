@@ -34,7 +34,8 @@ def detect_asset(text: str, assets: list[str]) -> str | None:
     upper = text.upper()
     for asset in assets:
         for alias in ASSET_ALIASES.get(asset, (asset,)):
-            if re.search(rf"(?:^|[^A-Z]|KX){re.escape(alias)}", upper):
+            # leading: start / non-letter / KX prefix; trailing: not another letter (KXBTCD is not BTC 15M)
+            if re.search(rf"(?:^|[^A-Z]|KX){re.escape(alias)}(?![A-Z])", upper):
                 return asset
     return None
 
@@ -42,10 +43,10 @@ def detect_asset(text: str, assets: list[str]) -> str | None:
 def series_matches_duration(series: dict[str, Any], minutes: int) -> bool:
     ticker = str(series.get("ticker", "")).upper()
     text = f"{series.get('frequency', '')} {series.get('title', '')}".lower()
-    return (
-        ticker.endswith(f"{minutes}M")
-        or f"{minutes} min" in text
-        or f"{minutes}-min" in text
+    m = re.escape(str(minutes))
+    return bool(
+        re.search(rf"(?<!\d){m}M$", ticker)  # "5M" must not match "15M"
+        or re.search(rf"(?<!\d){m}[ -]min", text)
         or (minutes == 15 and "fifteen" in text)
     )
 

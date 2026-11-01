@@ -110,7 +110,7 @@ def _v6(o: Observation, ctx: dict[str, Any]) -> str | None:
     model: HistoricalModel | None = ctx.get("model")
     if model is None or o.side is None or o.entry_price is None:
         return None
-    est = model.estimate(o.grade, o.regime, o.time_bucket, o.side, o.entry_price)
+    est = model.estimate(o.grade, o.regime, o.time_bucket, o.side, o.entry_price, asset=o.asset)
     gate = est.ev_low_cents if ctx.get("ev_gate", "lower") == "lower" else est.ev_cents
     if est.poor or not est.sufficient or (gate or 0) < ctx.get("min_ev", 1.0):
         return None

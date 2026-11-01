@@ -7,49 +7,67 @@ the Kalshi client or the database directly.
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
-from pathlib import Path
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, Protocol
 
 from app import DISPLAY_NAME
 from app.config import Settings
+from app.data.settlement_index import SettlementIndexFeed
 from app.data.underlying import NullUnderlyingProvider, UnderlyingPriceProvider
 from app.database.repository import Repository
 from app.errors import KalshiAuthError, KalshiError, TradingError
 from app.kalshi.auth import KalshiSigner
+from app.kalshi.contract import interpret_contract
 from app.kalshi.keystore import KeyStore
-from app.data.settlement_index import SettlementIndexFeed
-from app.telegram.pnl_dashboard import DashboardData, TradeRow, render_dashboard
-from app.telegram.pnl_image import ET, PnlCard
 from app.kalshi.market_data import MarketDataService, MarketInfo, MarketSnapshot
 from app.kalshi.markets import MarketDiscovery
 from app.kalshi.websocket import KalshiWebSocket
+from app.research.adaptive import AdaptiveState, assess
+from app.research.btc_calibration import CalibrationReport, calibration_report
+from app.research.calibration import HistEstimate, HistoricalModel
+from app.research.dataset import from_btc_signal, from_signal
+from app.research.tradeanalysis import (
+    analyze_trade,
+    describe,
+    entry_snapshot,
+    exit_snapshot,
+)
 from app.risk.manager import RiskDecision, RiskManager
 from app.risk.profiles import RiskLevel, RiskProfile, load_profiles
 from app.risk.sizing import PositionSizer
 from app.state import BotState, StateStore
-from app.research.adaptive import AdaptiveState, assess
-from app.research.calibration import HistEstimate, HistoricalModel
-from app.research.btc_calibration import CalibrationReport, calibration_report
-from app.research.dataset import from_btc_signal, from_signal
-from app.kalshi.contract import interpret_contract
-from app.strategy.btc_decision import UNCALIBRATED, BTCInputs, BTCParams, BTCSignal, decide
-from app.strategy.btc_model import ModelConfig, classify_regime, compute_btc_features, estimate_probability
-from app.research.tradeanalysis import analyze_trade, describe, entry_snapshot, exit_snapshot
+from app.strategy.btc_decision import (
+    UNCALIBRATED,
+    BTCInputs,
+    BTCParams,
+    BTCSignal,
+    decide,
+)
+from app.strategy.btc_model import (
+    ModelConfig,
+    classify_regime,
+    compute_btc_features,
+    estimate_probability,
+)
 from app.strategy.config import StrategyConfig
 from app.strategy.engine import SignalEngine
-from app.telegram import messages
 from app.strategy.signals import SignalResult
+from app.telegram import messages
+from app.telegram.pnl_dashboard import DashboardData, TradeRow, render_dashboard
+from app.telegram.pnl_image import ET, PnlCard
 from app.trading.executor import TradeExecutor
 from app.trading.live import LiveExecutor
 from app.trading.paper import PaperExecutor
 from app.trading.portfolio import Portfolio
 from app.trading.positions import Position
+from app.trading.reconcile import ReconcileReport, compare_positions, recover_orders
 from app.trading.tickets import TicketStore, TradeTicket
 from app.utils.logging import log_event
 from app.utils.time import day_key, utcnow
@@ -91,7 +109,7 @@ class BotRuntime:
         defaults = BotState(
             risk_level=RiskLevel(settings.default_risk_level),
             auto_trade=settings.auto_trading,
-            mode="live" if settings.live_allowed else "paper",
+            mode="paper",  # always boot in PAPER; switching to live needs an explicit, confirmed action
         )
         self.store = StateStore(repo, defaults)
         if self.store.state.mode == "live" and not settings.live_allowed:
@@ -109,6 +127,7 @@ class BotRuntime:
         self.btc_mode = settings.strategy_mode == "btc"
         self.btc_cfg = ModelConfig(sigma_window_min=settings.btc_sigma_window_min, basis_bps=settings.btc_basis_bps)
         self.calibration: CalibrationReport | None = None
+        self.reconcile_report: ReconcileReport | None = None
         self.model = self._build_model()
         self._model_built = time.time()
         self.adaptive = AdaptiveState("NORMAL")
@@ -208,7 +227,7 @@ class BotRuntime:
             out["positions"] = sum(1 for p in pos.get("market_positions", []) if p.get("position"))
         except KalshiAuthError:
             out["error"] = "Kalshi rejected the key"
-        except (KalshiError, asyncio.TimeoutError):
+        except (TimeoutError, KalshiError):
             out["error"] = "couldn't reach Kalshi right now"
         return out
 
@@ -253,7 +272,7 @@ class BotRuntime:
             data = self.pnl_dashboard(mode, title="SESSION SUMMARY" if title.startswith("SESSION") else "P&L OVERVIEW")
             png = await asyncio.to_thread(render_dashboard, data, DISPLAY_NAME)
             return await self.notifier.photo(kind, key, png, caption)
-        except Exception:  # noqa: BLE001 - an image problem must never block trade messages
+        except Exception:
             log.exception("PNL_IMAGE_FAILED kind=%s", kind)
             return False
 
@@ -262,7 +281,7 @@ class BotRuntime:
             return
         try:
             await self.notifier.alert(kind, key, text, buttons)
-        except Exception:  # noqa: BLE001 - alert failures must never kill trading loops
+        except Exception:
             log.exception("ALERT_FAILED kind=%s", kind)
 
     # --------------------------------------------------------------- control
@@ -275,6 +294,8 @@ class BotRuntime:
         self._spawn(self._discovery_loop(), "discovery")
         self._spawn(self._poll_loop(), "poll")
         self._spawn(self._maintenance_loop(), "maintenance")
+        if self.live is not None:
+            self._spawn(self.reconcile_live(), "reconcile")  # crash recovery: resolve leftover live orders
         signer = getattr(self.client, "signer", None)
         if self.settings.use_websocket and signer is not None and not self.fixture_mode:
             self.ws = KalshiWebSocket(self.settings.ws_url, signer, self._on_ws)
@@ -507,7 +528,7 @@ class BotRuntime:
         price = snap.entry_price(side) if side else None
         if a is None or side is None or price is None:
             return None
-        return self.model.estimate(a.grade, a.regime.value, a.time_bucket, side, price)
+        return self.model.estimate(a.grade, a.regime.value, a.time_bucket, side, price, asset=snap.info.asset)
 
     def record_observation(self, sig: SignalResult, snap: MarketSnapshot, now: datetime | None = None) -> bool:
         now = now or utcnow()
@@ -708,6 +729,10 @@ class BotRuntime:
                 attempt += 1
                 self.last_error = f"discovery: {exc}"
                 log_event(log, "DISCOVERY_FAILED", logging.WARNING, error=exc)
+            except Exception as exc:  # unexpected: log with traceback and retry with backoff instead of dying
+                attempt += 1
+                self.last_error = f"discovery crashed: {exc!r}"
+                log.error("DISCOVERY_ERROR error=%r", exc, exc_info=exc)
             self._rediscover.clear()
             timeout = self.settings.discovery_interval_sec * (1 if attempt == 0 else min(8, 2**attempt) / 2)
             try:
@@ -730,7 +755,11 @@ class BotRuntime:
                 self.last_error = f"{info.ticker}: {exc}"
                 log_event(log, "POLL_FAILED", logging.WARNING, ticker=info.ticker, error=exc)
                 continue
-            results.append(await self.process_snapshot(snap))
+            try:
+                results.append(await self.process_snapshot(snap))
+            except Exception as exc:  # one bad market must not stop the scanner; logged loudly, not ignored
+                self.last_error = f"{info.ticker}: processing failed: {exc!r}"
+                log.error("PROCESS_FAILED ticker=%s error=%r", info.ticker, exc, exc_info=exc)
         self.last_poll_at = utcnow()
         await self._connectivity_alerts()
         return results
@@ -746,7 +775,11 @@ class BotRuntime:
 
     async def _poll_loop(self) -> None:
         while True:
-            await self.poll_once()
+            try:
+                await self.poll_once()
+            except Exception as exc:  # keep scanning; the error is logged with traceback and shown in /health
+                self.last_error = f"poll loop: {exc!r}"
+                log.error("POLL_LOOP_ERROR error=%r", exc, exc_info=exc)
             await asyncio.sleep(self.settings.poll_interval_sec)
 
     async def evaluate_snapshot(self, snap: MarketSnapshot) -> SignalResult:
@@ -759,7 +792,9 @@ class BotRuntime:
         sig = self.engine.evaluate(snap, threshold=prof.min_confidence, min_quality=prof.min_signal_quality,
                                    threshold_label=prof.level.title, spot=spot, spot_history=spot_hist)
         if self.btc_mode:
-            sig = replace(sig, btc=await self.btc_decision(snap, spot=spot))
+            # BTC_SPOT_SOURCE=index: let btc_decision read Kalshi's settlement index (falls back to Coinbase)
+            btc_spot = None if self.settings.btc_spot_source == "index" else spot
+            sig = replace(sig, btc=await self.btc_decision(snap, spot=btc_spot))
             self.engine.latest[snap.ticker] = sig
         self._last_signal[snap.ticker] = sig
         return sig
@@ -911,6 +946,35 @@ class BotRuntime:
         if snap:
             self.engine.record(snap)
 
+    async def reconcile_live(self, periodic: bool = False, now: datetime | None = None) -> ReconcileReport | None:
+        """Compare the bot's live positions/orders with Kalshi's. Mismatched markets are blocked and reported."""
+        if self.live is None or getattr(self.client, "signer", None) is None:
+            return None
+        now = now or utcnow()
+        if periodic and self.reconcile_report and (now - self.reconcile_report.at).total_seconds() < 300:
+            return self.reconcile_report
+        report = ReconcileReport(at=now)
+        try:
+            report.recovered, blocked = await recover_orders(self.client, self.repo)
+            report.mismatches = compare_positions(self.portfolio.open_positions("live"),
+                                                  await self.client.get_market_positions())
+        except KalshiError as exc:
+            report.ok, report.error = False, f"could not reach Kalshi: {exc}"
+            self.reconcile_report = report
+            return report
+        report.blocked = blocked | {m.ticker for m in report.mismatches if m.tracked}
+        report.ok = not report.blocked
+        self.portfolio.unresolved |= report.blocked
+        self.reconcile_report = report
+        alerts = [n for n in report.recovered if n.startswith("⚠️")] + [m.text for m in report.mismatches]
+        if alerts:
+            log_event(log, "RECONCILE_MISMATCH", logging.ERROR, n=len(alerts))
+            body = "\n".join(f"• {html.escape(a)}" for a in alerts[:10])
+            await self.notify("reconcile", "reconcile:" + "|".join(sorted(alerts))[:200],
+                              "🚨 <b>POSITION CHECK vs KALSHI</b>\n" + body +
+                              "\n\nMarkets the bot tracks with a mismatch are blocked for new orders.")
+        return report
+
     async def settle_positions(self, now: datetime | None = None) -> list[Position]:
         """Settle positions whose market has closed and has a published result."""
         now = now or utcnow()
@@ -926,11 +990,14 @@ class BotRuntime:
             result = str(raw.get("result") or "")
             if result not in ("yes", "no"):
                 continue  # not determined yet - never guess an outcome
-            if pos.mode == "paper":
-                self.paper.settle(pos, result)
-            else:
-                self.portfolio.close(pos, 100.0 if result == pos.side else 0.0, 0.0,
-                                     f"settled {result.upper()}", action="SETTLE")
+            async with self.executor.lock_for(pos.ticker):  # no race with a manual/early exit
+                if not pos.is_open:
+                    continue
+                if pos.mode == "paper":
+                    self.paper.settle(pos, result)
+                else:
+                    self.portfolio.close(pos, 100.0 if result == pos.side else 0.0, 0.0,
+                                         f"settled {result.upper()}", action="SETTLE")
             settled.append(pos)
             await self._after_close(pos)
         await self.score_early_exits(now)
@@ -956,6 +1023,14 @@ class BotRuntime:
                     log_event(log, "RETENTION_PURGE", **purged)
             except KalshiError as exc:
                 log_event(log, "MAINTENANCE_FAILED", logging.WARNING, error=exc)
+            except Exception as exc:  # keep settling and labelling; logged with traceback, shown in /health
+                self.last_error = f"maintenance: {exc!r}"
+                log.error("MAINTENANCE_ERROR error=%r", exc, exc_info=exc)
+            if self.state.mode == "live" and self.live is not None:
+                try:
+                    await self.reconcile_live(periodic=True)
+                except Exception as exc:
+                    log.error("RECONCILE_ERROR error=%r", exc, exc_info=exc)
             await asyncio.sleep(15)
 
     async def shutdown(self) -> None:
