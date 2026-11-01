@@ -68,6 +68,11 @@ class Settings(BaseSettings):
 
     # --- Market discovery -----------------------------------------------
     assets: str = "BTC"
+    # --- Gold (research only; never trades) ---------------------------------
+    gold_enabled: bool = False  # discover + validate Kalshi Gold markets and show /gold status
+    gold_categories: str = "Commodities"  # Kalshi series categories searched for gold (full list also scanned)
+    gold_pyth_feed_id: str = ""  # Pyth XAU/USD feed id (scripts/gold_check.py finds it); empty = no provider
+    gold_stale_sec: float = Field(120.0, ge=5)
     series_tickers: str = ""
     auto_discover_series: bool = True
     market_duration_minutes: int = Field(15, ge=1, le=240)

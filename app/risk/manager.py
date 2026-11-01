@@ -18,6 +18,8 @@ from app.utils.logging import log_event
 from app.utils.time import utcnow
 
 log = logging.getLogger(__name__)
+# Assets the bot may observe but must never trade until a pricing model is validated for them.
+RESEARCH_ONLY_ASSETS = frozenset({"GOLD", "XAU"})
 
 
 @dataclass(frozen=True)
@@ -100,6 +102,8 @@ class RiskManager:
         warnings: list[str] = []
         lvl = profile.level.title
 
+        if snap.info.asset.upper() in RESEARCH_ONLY_ASSETS:
+            fails.append(f"{snap.info.asset} is research-only (no validated pricing model) - never traded")
         if not ctx.trading_enabled:
             fails.append(f"Trading disabled: {ctx.disabled_reason}")
         if not ctx.mode_permitted:

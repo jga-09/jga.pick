@@ -24,8 +24,9 @@ ASSET_ALIASES: dict[str, tuple[str, ...]] = {
     "SOL": ("SOL", "SOLANA"),
     "XRP": ("XRP", "RIPPLE"),
     "DOGE": ("DOGE", "DOGECOIN"),
+    "GOLD": ("GOLD", "XAU"),  # research only - never traded (see app/risk/manager.RESEARCH_ONLY_ASSETS)
 }
-ASSET_ICONS = {"BTC": "₿", "ETH": "Ξ", "SOL": "◎", "XRP": "✕", "DOGE": "Ð"}
+ASSET_ICONS = {"BTC": "₿", "ETH": "Ξ", "SOL": "◎", "XRP": "✕", "DOGE": "Ð", "GOLD": "🥇"}
 
 
 def dollars_to_cents(value: Any) -> float | None:

@@ -67,6 +67,7 @@ from app.trading.live import LiveExecutor
 from app.trading.paper import PaperExecutor
 from app.trading.portfolio import Portfolio
 from app.trading.positions import Position
+from app.gold.status import GoldStatus, gold_status
 from app.trading.reconcile import ReconcileReport, compare_positions, recover_orders
 from app.trading.tickets import TicketStore, TradeTicket
 from app.utils.logging import log_event
@@ -128,6 +129,8 @@ class BotRuntime:
         self.btc_cfg = ModelConfig(sigma_window_min=settings.btc_sigma_window_min, basis_bps=settings.btc_basis_bps)
         self.calibration: CalibrationReport | None = None
         self.reconcile_report: ReconcileReport | None = None
+        self.gold_provider: Any = None  # PythGoldProvider when GOLD_ENABLED + GOLD_PYTH_FEED_ID (research only)
+        self.gold: GoldStatus | None = None
         self.model = self._build_model()
         self._model_built = time.time()
         self.adaptive = AdaptiveState("NORMAL")
@@ -975,6 +978,16 @@ class BotRuntime:
                               "\n\nMarkets the bot tracks with a mismatch are blocked for new orders.")
         return report
 
+    async def refresh_gold(self, force: bool = False) -> GoldStatus | None:
+        """Gold research status (discovery + rule check + quotes + price). Never trades."""
+        if not self.settings.gold_enabled:
+            return None
+        if not force and self.gold and (utcnow() - self.gold.at).total_seconds() < 60:
+            return self.gold
+        cats = [c.strip() for c in self.settings.gold_categories.split(",") if c.strip()]
+        self.gold = await gold_status(self.client, self.gold_provider, cats)
+        return self.gold
+
     async def settle_positions(self, now: datetime | None = None) -> list[Position]:
         """Settle positions whose market has closed and has a published result."""
         now = now or utcnow()
@@ -1026,6 +1039,11 @@ class BotRuntime:
             except Exception as exc:  # keep settling and labelling; logged with traceback, shown in /health
                 self.last_error = f"maintenance: {exc!r}"
                 log.error("MAINTENANCE_ERROR error=%r", exc, exc_info=exc)
+            if self.settings.gold_enabled:
+                try:
+                    await self.refresh_gold()
+                except Exception as exc:
+                    log.error("GOLD_STATUS_ERROR error=%r", exc, exc_info=exc)
             if self.state.mode == "live" and self.live is not None:
                 try:
                     await self.reconcile_live(periodic=True)
@@ -1041,6 +1059,8 @@ class BotRuntime:
             self._tasks.clear()
         self.store.state.running = False
         await self.underlying.close()
+        if self.gold_provider is not None:
+            await self.gold_provider.close()
         await self.client.close()
 
 

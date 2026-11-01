@@ -46,7 +46,14 @@ def build_runtime(settings: Settings) -> BotRuntime:
         underlying = FixtureUnderlyingProvider(client=client)  # synthetic, paired with fixture markets
     else:
         underlying = build_provider(settings.underlying_provider)
-    return BotRuntime(settings, repo, client, underlying=underlying, profiles=load_profiles())
+    gold = None
+    if settings.gold_enabled and settings.gold_pyth_feed_id and settings.data_source != "fixture":
+        from app.data.gold import PythGoldProvider
+
+        gold = PythGoldProvider(settings.gold_pyth_feed_id, stale_after_sec=settings.gold_stale_sec)
+    rt = BotRuntime(settings, repo, client, underlying=underlying, profiles=load_profiles())
+    rt.gold_provider = gold
+    return rt
 
 
 def main(argv: list[str] | None = None) -> int:
