@@ -45,7 +45,7 @@ def parse_index_bars(resp: Any) -> list[MinuteBar]:
 
 _START_KEYS = ("open_ts_ms", "open_ts", "start_ts", "start_time")
 _POINT_KEYS = ("ts_ms", "ts", "timestamp", "time", "t", "end_ts", "end_period_ts", "publish_time")
-_PRICE_KEYS = ("close", "price", "value", "c", "p", "y", "close_price")
+_PRICE_KEYS = ("close", "price", "value", "v", "c", "p", "y", "close_price")
 
 
 def _to_unix(v: Any) -> float | None:
@@ -97,7 +97,26 @@ def _generic_series(details: dict[str, Any]) -> list[MinuteBar]:
                 walk(item)
 
     walk(details)
-    return [best[t] for t in sorted(best)]
+    pts = [best[t] for t in sorted(best)]
+    if len(pts) >= 3:
+        gaps = sorted(b.ts.timestamp() - a.ts.timestamp() for a, b in zip(pts, pts[1:], strict=False))
+        if gaps[len(gaps) // 2] < 50:  # sub-minute ticks (Gold: 1-second Pyth prices) -> 1-minute bars
+            return _to_minutes(pts)
+    return pts
+
+
+def _to_minutes(ticks: list[MinuteBar]) -> list[MinuteBar]:
+    """Ticks -> 1-minute OHLC bars stamped at the END of their minute (a bar is only known once it ends)."""
+    out: dict[int, list[float]] = {}
+    for tk in ticks:
+        t = tk.ts.timestamp()
+        end = int(t // 60) * 60 + 60 if t % 60 else int(t)  # a tick exactly on :00 closes the previous minute
+        b = out.get(end)
+        if b is None:
+            out[end] = [tk.close, tk.close, tk.close, tk.close]
+        else:
+            b[1], b[2], b[3] = max(b[1], tk.close), min(b[2], tk.close), tk.close
+    return [MinuteBar(datetime.fromtimestamp(e, UTC), o, h, lo, c, 0.0) for e, (o, h, lo, c) in sorted(out.items())]
 
 
 def _float(v: Any) -> float | None:

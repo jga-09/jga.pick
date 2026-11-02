@@ -126,3 +126,17 @@ def test_generic_live_data_layouts_are_read():
     pairs = {"live_data": {"details": {"history": [[1790000000000, 3899.0], [1790000060000, 3899.5]]}}}
     assert [b.close for b in parse_index_bars(pairs)] == [3899.0, 3899.5]
     assert parse_index_bars({"live_data": {"details": {"note": "nothing here"}}}) == []
+
+
+def test_kalshi_gold_timeseries_layout_becomes_minute_bars():
+    """Real shape of GET /live_data/events/KXGOLD15M-... (1-second Pyth prices under details.timeseries)."""
+    from app.data.settlement_index import parse_index_bars
+
+    t0 = 1793587500000  # exactly on a minute boundary (ms)
+    ts = [{"t": t0 + i * 1000, "v": 3900 + i * 0.01} for i in range(0, 125)]
+    raw = {"live_data": {"details": {"asset": "GOLD", "cadence": "15min", "interval": "1s", "timeseries": ts}}}
+    bars = parse_index_bars(raw)
+    ends = [b.ts.timestamp() for b in bars]
+    assert ends == [t0 / 1000, t0 / 1000 + 60, t0 / 1000 + 120, t0 / 1000 + 180]
+    assert bars[1].close == pytest.approx(3900.60)  # last tick of the minute ending at +60 s (tick at +60 s)
+    assert bars[1].high == pytest.approx(3900.60) and bars[1].low == pytest.approx(3900.01)
