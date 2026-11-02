@@ -31,7 +31,8 @@ log = logging.getLogger(__name__)
 
 
 def detect_asset(text: str, assets: list[str]) -> str | None:
-    upper = text.upper()
+    # "Bitcoin Cash" (KXBCH15M) is NOT Bitcoin: hide the phrase so the BITCOIN alias cannot match it
+    upper = re.sub(r"BITCOIN\s*CASH", " BCH ", text.upper())
     for asset in assets:
         for alias in ASSET_ALIASES.get(asset, (asset,)):
             # leading: start / non-letter / KX prefix; trailing: not another letter (KXBTCD is not BTC 15M)

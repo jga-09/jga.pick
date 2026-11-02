@@ -153,3 +153,10 @@ def test_ws_ticker_merge(runtime):
     assert snap.yes_bid == 70 and snap.yes_ask == 72 and snap.last_price == 71 and snap.source == "ws"
     assert runtime.market_data.apply_ws_ticker({"market_ticker": "UNKNOWN", "yes_bid_dollars": "0.1"}) is None
     json.dumps({"ok": True})
+
+
+def test_bitcoin_cash_is_never_bitcoin():
+    from app.kalshi.markets import detect_asset
+
+    assert detect_asset("KXBCH15M Bitcoin Cash 15 min", ["BTC"]) is None
+    assert detect_asset("KXBTC15M Bitcoin price 15 min", ["BTC"]) == "BTC"

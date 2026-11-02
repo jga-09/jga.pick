@@ -132,3 +132,15 @@ def test_risk_manager_never_approves_gold(runtime):
     snap = runtime.market_data.latest[info.ticker]
     dec = runtime.check_risk(sig, snap)
     assert not dec.approved and any("research-only" in f for f in dec.failures)
+
+
+async def test_pyth_error_reports_status_and_retries_without_0x():
+    seen = []
+
+    def handler(req):
+        seen.append(str(req.url))
+        return httpx.Response(404, text="Price ids not found")
+
+    p = PythGoldProvider(FEED, http=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    assert await p.get_price("GOLD") is None
+    assert p.last_error.startswith("HTTP 404") and len(seen) == 2

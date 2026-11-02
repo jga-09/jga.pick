@@ -115,9 +115,16 @@ class PythGoldProvider:
         if asset.upper() not in GOLD_ASSETS:
             return None
         try:
-            r = await self.http.get(f"{HERMES}/v2/updates/price/latest",
-                                    params={"ids[]": self.feed_id, "parsed": "true"})
-            r.raise_for_status()
+            r = None
+            for fid in dict.fromkeys((self.feed_id, self.feed_id.lower().removeprefix("0x"))):
+                r = await self.http.get(f"{HERMES}/v2/updates/price/latest", params={"ids[]": fid, "parsed": "true"})
+                if r.status_code < 400:
+                    break
+            assert r is not None
+            if r.status_code >= 400:
+                self.last_error = f"HTTP {r.status_code}: {r.text[:120]}"
+                log.warning("GOLD_PRICE_FAILED status=%s body=%s", r.status_code, r.text[:120])
+                return None
             spot = parse_hermes(r.json(), self.feed_id)
         except (httpx.HTTPError, ValueError) as exc:
             self.last_error = f"{type(exc).__name__}"

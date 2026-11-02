@@ -121,7 +121,9 @@ def interpret_contract(info: MarketInfo, *, require_rules: bool = True,
 
     window = 0
     if rules:
-        if not _ASSET_WORDS.search(rules):
+        if re.search(r"bitcoin\s*cash|\bbch\b", rules, re.I):
+            problems.append("rules refer to Bitcoin Cash, not Bitcoin")
+        elif not _ASSET_WORDS.search(rules):
             problems.append("rules text does not refer to Bitcoin")
         has_up, has_down = bool(_ABOVE_WORDS.search(rules)), bool(_BELOW_WORDS.search(rules))
         if kind == "above" and has_down and not has_up:
