@@ -26,6 +26,7 @@ COMMANDS = [
     ("estop", "Emergency stop"), ("account", "Kalshi account & balance"), ("setkey", "Connect Kalshi API key (message auto-deleted)"),
     ("removekey", "Remove saved Kalshi key"), ("health", "Health check"), ("help", "Help"),
     ("eth", "ETH card (research comparison)"), ("sol", "SOL card (research comparison)"),
+    ("xrp", "XRP card"), ("doge", "DOGE card"), ("bnb", "BNB card"),
     ("gold", "Gold research status (never traded)"), ("today", "Today's performance"), ("week", "Last 7 days"),
     ("month", "Last 30 days"), ("performance", "All-time performance"), ("orders", "Live orders & Kalshi check"),
     ("models", "Model comparison"), ("kill", "Emergency stop (kill switch)"),

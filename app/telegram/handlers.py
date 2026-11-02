@@ -23,7 +23,7 @@ COMMAND_ROUTES = {
     "history": "hist:today", "strategy": "strat", "pause": "pause", "resume": "resume", "stop": "stop",
     "estop": "estop", "account": "kacct", "btc": "btc", "analytics": "banl", "backtest": "bt", "calibration": "bcal",
     # upgrade: per-asset cards, periods, orders, models, kill switch
-    "eth": "asset:ETH", "sol": "asset:SOL", "gold": "asset:GOLD", "today": "hist:today", "week": "hist:7d",
+    "eth": "asset:ETH", "sol": "asset:SOL", "xrp": "asset:XRP", "doge": "asset:DOGE", "bnb": "asset:BNB", "gold": "asset:GOLD", "today": "hist:today", "week": "hist:7d",
     "month": "hist:30d", "performance": "hist:all", "orders": "orders", "models": "models", "kill": "estop",
 }
 

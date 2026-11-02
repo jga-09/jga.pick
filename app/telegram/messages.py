@@ -842,7 +842,35 @@ def exit_check(pos: Position, direction: str, result: str, hold: float, saved: f
                       f"Cashing out got: {_signed(pos.realized_pnl or 0)}",
                       verdict, "",
                       f"<i>All early exits so far: {int(st.get('exits', 0))} · net {_signed(total)} "
-                      f"({int(st.get('helped', 0))} helped, {int(st.get('hurt', 0))} hurt)</i>"])
+                      f"({int(st.get('helped', 0))} helped, {int(st.get('hurt', 0))} hurt)</i>"]
+                     + ([f"<i>Take-profit only: {int(st['tp_exits'])} · net {_signed(st.get('tp_saved', 0.0))} vs "
+                         f"holding ({int(st.get('tp_helped', 0))} helped, {int(st.get('tp_hurt', 0))} hurt)</i>"]
+                        if st.get("tp_exits") else []))
+
+
+def daily_recap(day: str, mode: str, closed: list[Position]) -> str:
+    """One message per finished UTC day. P&L is after fees (it is the booked result of each trade)."""
+    n = len(closed)
+    pnl = sum(p.realized_pnl or 0 for p in closed)
+    fees = sum(p.entry_fee + p.exit_fee for p in closed)
+    wins = sum(1 for p in closed if (p.realized_pnl or 0) > 0)
+    lines = [f"🗓 <b>DAILY RECAP</b> · {escape(day)} (UTC) · {mode.upper()}", CARD_LINE]
+    if not n:
+        return "\n".join(lines + ["No trades closed."])
+    best = max(closed, key=lambda p: p.realized_pnl or 0)
+    worst = min(closed, key=lambda p: p.realized_pnl or 0)
+    by_asset: dict[str, float] = {}
+    for p in closed:
+        by_asset[p.asset] = by_asset.get(p.asset, 0.0) + (p.realized_pnl or 0)
+    avg_entry = sum(p.entry_price for p in closed) / n
+    lines += [f"Trades: {n} · won {wins} ({wins / n:.0%}) · avg entry {avg_entry:.0f}¢",
+              f"P&L after fees: <b>{_signed(pnl)}</b> · fees paid {money(fees, False)}",
+              f"Per trade: {_signed(pnl / n)}",
+              f"Best: {_signed(best.realized_pnl)} ({escape(best.label)}) · "
+              f"worst: {_signed(worst.realized_pnl)} ({escape(worst.label)})",
+              "By coin: " + ", ".join(f"{escape(a)} {_signed(v)}" for a, v in sorted(by_asset.items())),
+              "", "<i>One day is mostly luck - judge the strategy on hundreds of trades.</i>"]
+    return "\n".join(lines)
 
 
 def large_loss_alert(pos: Position) -> str:

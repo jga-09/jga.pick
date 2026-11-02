@@ -823,7 +823,7 @@ class BotRuntime:
         elif not strong and (sig.grade not in ("A+", "A")
                              or sig.confidence < self.settings.strong_signal_alert_min_confidence - 5):
             self._strong.pop(snap.ticker, None)  # hysteresis: re-arm only after it clearly weakens
-        if self.settings.early_exit:
+        if self.settings.early_exit or self.settings.take_profit_cents or self.settings.take_profit_price_cents:
             await self._manage_exits(sig, snap)
         if self.state.auto_trade and decision.approved:
             await self._auto_trade(sig, snap, decision)
@@ -837,6 +837,10 @@ class BotRuntime:
         if s.early_exit_stop_loss_pct > 0 and bid is not None and \
                 bid <= pos.entry_price * (1 - s.early_exit_stop_loss_pct / 100):
             return f"stop-loss: value down {s.early_exit_stop_loss_pct:g}%+"
+        if bid is not None and s.take_profit_price_cents > 0 and bid >= s.take_profit_price_cents:
+            return f"take-profit: bid {bid:.0f}¢ reached the {s.take_profit_price_cents:.0f}¢ target"
+        if bid is not None and s.take_profit_cents > 0 and bid - pos.entry_price >= s.take_profit_cents:
+            return f"take-profit: bid {bid:.0f}¢ is {bid - pos.entry_price:.0f}¢ above entry"
         b = sig.btc
         if b is not None and b.p_yes is not None:
             p_side = b.p_yes if pos.side == "yes" else 1 - b.p_yes
@@ -858,8 +862,12 @@ class BotRuntime:
                 continue
             n = self._exit_ticks[pos.id] = self._exit_ticks.get(pos.id, 0) + 1
             bid = snap.exit_price(pos.side)
-            if (n < s.early_exit_confirm_ticks or bid is None or bid < s.early_exit_min_bid_cents
-                    or snap.time_remaining() < s.early_exit_min_t_left_sec):
+            tp = reason.startswith("take-profit")
+            if not tp and not s.early_exit:
+                continue  # early exit off: only take-profit rules apply
+            if (n < s.early_exit_confirm_ticks or bid is None
+                    or (not tp and (bid < s.early_exit_min_bid_cents
+                                    or snap.time_remaining() < s.early_exit_min_t_left_sec))):
                 continue
             if pos.mode == "live":
                 if pos.id not in self._exit_suggested:  # never sell real money without a tap
@@ -908,6 +916,11 @@ class BotRuntime:
             for pos in plist:
                 hold = round(pos.contracts * (100 if result == pos.side else 0) / 100 - pos.cost - pos.entry_fee, 2)
                 saved = round((pos.realized_pnl or 0) - hold, 2)
+                if "take-profit" in (pos.close_reason or ""):  # separate scorecard for take-profit exits
+                    st["tp_exits"] = st.get("tp_exits", 0) + 1
+                    st["tp_saved"] = round(st.get("tp_saved", 0.0) + saved, 2)
+                    key = "tp_helped" if saved > 0 else "tp_hurt"
+                    st[key] = st.get(key, 0) + (1 if saved != 0 else 0)
                 st["exits"] += 1
                 st["saved"] = round(st["saved"] + saved, 2)
                 st["helped" if saved > 0 else "hurt"] += 1 if saved != 0 else 0
@@ -978,6 +991,23 @@ class BotRuntime:
                               "\n\nMarkets the bot tracks with a mismatch are blocked for new orders.")
         return report
 
+    async def send_daily_recap(self, now: datetime | None = None) -> str | None:
+        """After each UTC day closes, send one recap of that day (once; survives restarts). Returns the day."""
+        now = now or utcnow()
+        start = (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=1)
+        day = start.strftime("%Y-%m-%d")
+        if self.repo.get_setting("daily_recap_last") == day or self.notifier is None:
+            return None
+        self.repo.set_setting("daily_recap_last", day)  # mark first: a send failure must never cause spam
+        mode = self.state.mode
+        closed = [p for p in self.repo.closed_positions(mode=mode, since=start, limit=10_000)
+                  if p.closed_at is not None and p.closed_at < end]
+        if not closed and not self.state.running:
+            return day  # nothing happened and the bot is off: stay quiet
+        await self.notify("daily_recap", f"recap:{day}", messages.daily_recap(day, mode, closed))
+        return day
+
     async def refresh_gold(self, force: bool = False) -> GoldStatus | None:
         """Gold research status (discovery + rule check + quotes + price). Never trades."""
         if not self.settings.gold_enabled:
@@ -1039,6 +1069,11 @@ class BotRuntime:
             except Exception as exc:  # keep settling and labelling; logged with traceback, shown in /health
                 self.last_error = f"maintenance: {exc!r}"
                 log.error("MAINTENANCE_ERROR error=%r", exc, exc_info=exc)
+            if self.settings.daily_recap:
+                try:
+                    await self.send_daily_recap()
+                except Exception as exc:
+                    log.error("DAILY_RECAP_ERROR error=%r", exc, exc_info=exc)
             if self.settings.gold_enabled:
                 try:
                     await self.refresh_gold()

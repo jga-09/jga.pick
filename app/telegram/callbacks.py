@@ -40,7 +40,7 @@ ACTIONS: dict[str, tuple[int, ...]] = {
     "clear": (0,), "estop": (0,), "estopok": (0,), "ereset": (0,), "eresetok": (0,), "pnl": (0,),
     "asset": (1,), "orders": (0,), "models": (0,),
 }
-CARD_ASSETS = ("BTC", "ETH", "SOL", "XRP", "DOGE", "GOLD")
+CARD_ASSETS = ("BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "GOLD")
 
 
 @dataclass

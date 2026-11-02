@@ -131,6 +131,12 @@ class Settings(BaseSettings):
     early_exit_min_bid_cents: float = Field(5.0, ge=1, le=50)  # not worth selling below this
     early_exit_min_t_left_sec: float = Field(45.0, ge=0)
     early_exit_stop_loss_pct: float = Field(0.0, ge=0, le=95)  # 0 = off; e.g. 50 = sell if value halves
+    # Take-profit (0 = off). Paper sells automatically; live only gets a Sell button. Each one is scored against
+    # simply holding to settlement, so you can see whether it helps (selling early pays the spread + a 2nd fee).
+    take_profit_cents: float = Field(0.0, ge=0, le=99)  # sell when the bid is this many cents above entry
+    take_profit_price_cents: float = Field(0.0, ge=0, le=99)  # sell when the bid reaches this price
+    # Daily recap: one Telegram message after each UTC day closes (trades, P&L after fees, fees, best/worst)
+    daily_recap: bool = True
     # Send a P&L image after every finished trade and when the bot is stopped.
     pnl_image: bool = True
     strong_signal_alert_min_confidence: int = Field(80, ge=0, le=100)
