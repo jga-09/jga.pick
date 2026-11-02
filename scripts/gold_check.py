@@ -28,8 +28,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import Settings
 from app.data.gold import KalshiGoldFeed
-from app.data.settlement_index import compact, parse_index_bars
-from app.data.underlying import SpotPrice
 from app.errors import KalshiError
 from app.gold.markets import (
     discover_gold_series,
@@ -39,7 +37,7 @@ from app.gold.markets import (
 from app.kalshi.client import KalshiClient
 from app.kalshi.market_data import parse_market_info
 from app.research.fairvalue import brier, build_points, calibration_table
-from app.research.replay import HistoryDownloader, _record_candles
+from app.research.replay import CoinbaseHistory, HistoryDownloader, _record_candles
 from app.utils.time import parse_ts
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -77,7 +75,8 @@ async def main_async(a: argparse.Namespace) -> int:
                 print(f"   {ser['ticker']}: no open market right now")
                 continue
             info = parse_market_info(raws[0], asset="GOLD", series_ticker=ser["ticker"])
-            chk = validate_gold_market(info, provider.source, datetime.now(UTC))
+            srcs = [str(x.get("name") or x) for x in ser.get("settlement_sources") or []]
+            chk = validate_gold_market(info, provider.source, datetime.now(UTC), srcs)
             print(f"   {info.ticker}: strike_type={info.strike_type} strike={info.floor_strike or info.cap_strike}")
             print(f"     rules: {info.rules_primary[:300]}")
             print(f"     {'✅ VERIFIED' if chk.verified else '❌ ' + '; '.join(chk.problems)}  (source: {chk.source})")
@@ -104,42 +103,59 @@ async def validate_model(client: KalshiClient, provider: KalshiGoldFeed, series:
     print(f"   settled markets: {len(markets)}")
     if not markets:
         return
-    # per event: Kalshi's 1-minute Pyth settlement candles (cached inside each market file under "index")
-    spot_rows: dict[float, float] = {}
-    fetched = empty = failed = 0
-    for i, m in enumerate(markets, 1):
-        rec = await dl.market_data(series, m)
-        if not rec:
-            continue
-        if "index" not in rec:
-            ev = (rec.get("market") or {}).get("event_ticker") or m.get("event_ticker")
-            try:
-                bars = parse_index_bars(await client.get_event_live_data(ev)) if ev else []
-            except KalshiError:
-                failed += 1
-                continue
-            fetched += 1
-            empty += 0 if bars else 1
-            rec["index"] = compact(bars)
-            (cache / f"{rec['market']['ticker']}.json.gz").write_bytes(
-                gzip.compress(json.dumps(rec, separators=(",", ":")).encode()))
-        for t, c in rec.get("index") or []:
-            spot_rows[float(t)] = float(c)
-        if i % 200 == 0:
-            print(f"   {i}/{len(markets)} markets · settlement candles fetched {fetched} ({empty} empty, "
-                  f"{failed} failed)", flush=True)
-    rows = sorted(spot_rows.items())
-    (cache / "pyth_xau_index.json.gz").write_bytes(gzip.compress(json.dumps([list(r) for r in rows]).encode()))
-    spot = [SpotPrice("GOLD", c, datetime.fromtimestamp(t, UTC), "kalshi_pyth_index") for t, c in rows]
-    print(f"   gold minutes from Kalshi settlement data: {len(spot):,} ({failed} events failed, {empty} empty)")
+    # Kalshi does not publish past Gold settlement candles (/live_data is empty for Gold events), and Pyth's
+    # public API now needs a key. Proxy: PAXG (Paxos Gold, 1 token = 1 fine troy oz) 1-minute candles from
+    # Coinbase - real and timestamped, but NOT the settlement source, so its basis is measured below.
+    hist = CoinbaseHistory(cache)
+    days_list = sorted({(parse_ts(m["close_time"]) or until).date() for m in markets})
+    spot = []
+    try:
+        for d in days_list:
+            spot += await hist.day("PAXG", datetime(d.year, d.month, d.day, tzinfo=UTC))
+    finally:
+        await hist.close()
+    spot = sorted({p.ts: p for p in spot}.values(), key=lambda p: p.ts)
+    print(f"   PAXG (gold proxy) minutes from Coinbase: {len(spot):,}")
     if not spot:
-        print("   ❌ Kalshi returned no settlement candles for past Gold events - cannot validate a model.")
+        print("   ❌ No PAXG history (Coinbase PAXG-USD unavailable) - cannot validate a model.")
         return
-    points = []
+    # basis check: Kalshi's strike IS the Pyth gold price at the window start -> compare PAXG there
+    from app.research.fairvalue import spot_at
+
+    diffs, agree, total = [], 0, 0
+    recs = []
     for m in markets:
         rec = await dl.market_data(series, m)
-        if not rec:
+        if rec:
+            recs.append(rec)
+    for rec in recs:
+        mk = rec["market"]
+        close, strike = parse_ts(mk.get("close_time")), mk.get("floor_strike")
+        opened = parse_ts(mk.get("open_time"))
+        if close is None or opened is None or not isinstance(strike, (int, float)):
             continue
+        a, b = spot_at(spot, opened), spot_at(spot, close)
+        if a is None or b is None:
+            continue
+        diffs.append((a.price / strike - 1) * 1e4)
+        if mk.get("result") in ("yes", "no"):
+            total += 1
+            agree += int((b.price >= a.price) == (mk["result"] == "yes"))
+    if diffs:
+        ds = sorted(diffs)
+        med = ds[len(ds) // 2]
+        mad = sorted(abs(x - med) for x in ds)[len(ds) // 2]
+        print(f"   basis PAXG vs Pyth (Kalshi strike) at window start: median {med:+.1f} bps, "
+              f"typical deviation {mad:.1f} bps ({len(ds)} markets)")
+    if total:
+        print(f"   PAXG direction over the window agreed with Kalshi's result in {agree}/{total} "
+              f"({agree / total:.1%}) markets")
+        if agree / total < 0.95:
+            print("   ⚠️ The proxy disagrees with settlement too often: model results below are unreliable.")
+    rows = [[p.ts.timestamp(), p.price] for p in spot]
+    (cache / "pyth_xau_proxy_paxg.json.gz").write_bytes(gzip.compress(json.dumps(rows).encode()))
+    points = []
+    for rec in recs:
         mk = rec["market"]
         close = parse_ts(mk.get("close_time"))
         strike = mk.get("floor_strike")
@@ -149,7 +165,7 @@ async def validate_model(client: KalshiClient, provider: KalshiGoldFeed, series:
         points += build_points(mk["ticker"], "GOLD", float(strike), close, mk["result"], quotes, spot)
     b_model, b_mid, n = brier(points)
     if not n:
-        print("   no comparable minutes (missing Pyth history or quotes)")
+        print("   no comparable minutes (missing PAXG history or quotes)")
         return
     print(f"   Brier: model {b_model:.4f} vs Kalshi mid {b_mid:.4f} over {n:,} minutes "
           f"({len({p.ticker for p in points})} markets)")

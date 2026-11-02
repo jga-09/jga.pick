@@ -78,7 +78,10 @@ class GoldCheck:
     problems: tuple[str, ...] = field(default_factory=tuple)
 
 
-def validate_gold_market(info: MarketInfo, provider_source: str | None, now: datetime | None = None) -> GoldCheck:
+def validate_gold_market(info: MarketInfo, provider_source: str | None, now: datetime | None = None,
+                         series_sources: list[str] | None = None) -> GoldCheck:
+    """``series_sources``: the series' own settlement_sources from Kalshi (used when the market's rules text
+    does not name the source, e.g. "the close price of the 1-minute candlestick for Gold")."""
     problems: list[str] = []
     rules = f"{info.rules_primary} {info.rules_secondary}".strip()
     st = (info.strike_type or "").lower()
@@ -103,6 +106,8 @@ def validate_gold_market(info: MarketInfo, provider_source: str | None, now: dat
         if kind == "below" and up and not down:
             problems.append("rules describe ABOVE but strike type says BELOW")
         source = settlement_source(rules)
+        if source is None and series_sources:
+            source = settlement_source(" ".join(series_sources))
         if source is None:
             problems.append("settlement source not identified in the rules")
         elif provider_source is None:

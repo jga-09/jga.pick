@@ -84,7 +84,9 @@ async def gold_status(client: Any, provider: Any, categories: list[str], now: da
         return st
     name = getattr(provider, "name", "") if provider is not None else ""
     provider_source = "pyth" if name in ("pyth_gold", "kalshi_gold_index") else None
-    st.check = validate_gold_market(st.market, provider_source, now)
+    ser = next((x for x in st.series if str(x.get("ticker")) == st.market.series_ticker), {})
+    srcs = [str(x.get("name") or x) for x in ser.get("settlement_sources") or []]
+    st.check = validate_gold_market(st.market, provider_source, now, srcs)
     st.problems.extend(st.check.problems)
     if st.spread is None:
         st.problems.append("no two-sided quote")

@@ -172,3 +172,12 @@ async def test_gold_status_with_kalshi_feed_is_ready():
     feed.latest = AsyncMock(return_value=MagicMock(price=3911.0, ts=NOW))
     st = await gold_status(client, feed, ["Commodities"], NOW)
     assert st.ready and st.check.verified
+
+
+def test_source_from_series_when_rules_do_not_name_it():
+    rules = "If the close price of the 1-minute candlestick for Gold at 10:00 PM EST is at least 3903.95, Yes."
+    info = _info(rules=rules)
+    assert not validate_gold_market(info, "pyth", NOW).verified
+    ok = validate_gold_market(info, "pyth", NOW, series_sources=["Pyth - Gold"])
+    assert ok.verified and ok.source == "pyth"
+    assert not validate_gold_market(info, "pyth", NOW, series_sources=["ICE"]).verified
