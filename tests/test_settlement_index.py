@@ -112,3 +112,17 @@ async def test_runtime_uses_index_spot_with_fallback(runtime):
     runtime.settlement_index = SettlementIndexFeed()
     sig2 = await runtime.btc_decision(quote_snapshot(make_info()), now)
     assert sig2.features.spot != 77777.0  # fell back to the normal feed
+
+
+def test_generic_live_data_layouts_are_read():
+    from app.data.settlement_index import parse_index_bars
+
+    pts = {"live_data": {"type": "pyth_gold", "details": {"series": {"points": [
+        {"ts": 1790000000, "price": 3901.5}, {"ts": 1790000060, "price": 3902.0}]}}}}
+    bars = parse_index_bars(pts)
+    assert [b.close for b in bars] == [3901.5, 3902.0] and bars[0].ts.timestamp() == 1790000000
+    candles = {"live_data": {"details": {"candles": [{"start_ts": 1790000000, "close": "3900.1"}]}}}
+    assert parse_index_bars(candles)[0].ts.timestamp() == 1790000060  # start -> end of minute
+    pairs = {"live_data": {"details": {"history": [[1790000000000, 3899.0], [1790000060000, 3899.5]]}}}
+    assert [b.close for b in parse_index_bars(pairs)] == [3899.0, 3899.5]
+    assert parse_index_bars({"live_data": {"details": {"note": "nothing here"}}}) == []

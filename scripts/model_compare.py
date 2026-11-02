@@ -109,9 +109,12 @@ def main() -> int:
             cache = Path(a.gold_cache)
             # Gold price = Coinbase PAXG proxy (scripts/gold_check.py --days N downloads it and measures its basis
             # vs Kalshi's Pyth strikes); falls back to any cached Pyth closes.
-            bars = load_crypto_bars(cache, "PAXG") or load_gold_bars(cache)
+            bars = load_gold_bars(cache)  # exact Kalshi/Pyth settlement prices, when Kalshi provides them
+            label = "Kalshi/Pyth settlement prices (exact)"
+            if not bars:
+                bars, label = load_crypto_bars(cache, "PAXG"), "Coinbase PAXG proxy (not the settlement source)"
             markets = load_markets(cache, "KXGOLD15M-")
-            print(f"\nGOLD: price = {'Coinbase PAXG proxy (not the settlement source)' if bars else 'none'}")
+            print(f"\nGOLD: price = {label if bars else 'none'}")
         else:
             cache = Path(a.cache)
             bars, markets = load_crypto_bars(cache, asset), load_markets(cache, f"KX{asset}15M-")

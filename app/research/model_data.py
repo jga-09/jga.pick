@@ -30,9 +30,10 @@ def load_crypto_bars(cache: Path, asset: str) -> list[Bar]:
     return [by_end[k] for k in sorted(by_end)]
 
 
-def load_gold_bars(cache: Path) -> list[Bar]:
+def load_gold_bars(cache: Path, pattern: str = "pyth_xau_kalshi.json.gz") -> list[Bar]:
+    """Exact Pyth settlement prices saved by scripts/gold_check.py (from Kalshi's /live_data)."""
     by_end: dict[float, Bar] = {}
-    for f in sorted(cache.glob("pyth_xau_*.json.gz")):
+    for f in sorted(cache.glob(pattern)):
         try:
             rows = json.loads(gzip.decompress(f.read_bytes()))
         except (OSError, ValueError):

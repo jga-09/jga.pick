@@ -28,6 +28,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import Settings
 from app.data.gold import KalshiGoldFeed
+from app.data.settlement_index import compact, parse_index_bars
+from app.data.underlying import SpotPrice
 from app.errors import KalshiError
 from app.gold.markets import (
     discover_gold_series,
@@ -63,6 +65,8 @@ async def main_async(a: argparse.Namespace) -> int:
         print(f"   15-minute Gold series: {', '.join(x['ticker'] for x in fifteen) or 'NONE'}")
 
         provider = KalshiGoldFeed(stale_after_sec=s.gold_stale_sec)
+        if a.dump_live and fifteen:
+            await dump_live(client, fifteen[0]["ticker"])
         print("\nSTEP 3 - open market rules check")
         target = fifteen or series
         for ser in target[:3]:
@@ -93,6 +97,33 @@ async def main_async(a: argparse.Namespace) -> int:
     return 0
 
 
+async def dump_live(client: KalshiClient, series: str) -> None:
+    """Raw /live_data replies for the open and the latest settled Gold event, saved for inspection."""
+    print("\nLIVE DATA DUMP (Kalshi /live_data for Gold events)")
+    events = []
+    for status in ("open", "settled"):
+        try:
+            ms = await client.get_markets(series_ticker=series, status=status, limit=3, max_pages=1)
+        except KalshiError as exc:
+            print(f"   {status}: {exc}")
+            continue
+        events += [m.get("event_ticker") for m in ms[:1] if m.get("event_ticker")]
+    out = ROOT / "data" / "gold_cache"
+    out.mkdir(parents=True, exist_ok=True)
+    for ev in events:
+        for rng in (None, "15min", "1h"):
+            try:
+                raw = await client.get_event_live_data(ev, rng)
+            except KalshiError as exc:
+                print(f"   {ev} range={rng}: {exc}")
+                continue
+            path = out / f"live_sample_{ev}_{rng or 'default'}.json"
+            path.write_text(json.dumps(raw, indent=1)[:200_000])
+            bars = parse_index_bars(raw)
+            print(f"   {ev} range={rng}: parsed {len(bars)} price points · saved {path.name}")
+            print("   " + json.dumps(raw)[:700].replace("\n", " "))
+
+
 async def validate_model(client: KalshiClient, provider: KalshiGoldFeed, series: str, days: int) -> None:
     print(f"\nSTEP 4 - model validation on settled {series} markets (last {days} days)")
     cache = ROOT / "data" / "gold_cache"
@@ -103,9 +134,44 @@ async def validate_model(client: KalshiClient, provider: KalshiGoldFeed, series:
     print(f"   settled markets: {len(markets)}")
     if not markets:
         return
-    # Kalshi does not publish past Gold settlement candles (/live_data is empty for Gold events), and Pyth's
-    # public API now needs a key. Proxy: PAXG (Paxos Gold, 1 token = 1 fine troy oz) 1-minute candles from
-    # Coinbase - real and timestamped, but NOT the settlement source, so its basis is measured below.
+    # 1st choice: Kalshi's own Pyth settlement prices per event (/live_data, any layout). Free and exact.
+    exact: dict[float, float] = {}
+    got = tried = 0
+    for i, m in enumerate(markets, 1):
+        rec = await dl.market_data(series, m)
+        if not rec:
+            continue
+        if not rec.get("index"):  # missing, or cached empty by an older version that could not read gold
+            ev = (rec.get("market") or {}).get("event_ticker") or m.get("event_ticker")
+            if not ev:
+                continue
+            tried += 1
+            try:
+                bars = parse_index_bars(await client.get_event_live_data(ev))
+            except KalshiError:
+                continue
+            if bars:
+                rec["index"] = compact(bars)
+                (cache / f"{rec['market']['ticker']}.json.gz").write_bytes(
+                    gzip.compress(json.dumps(rec, separators=(",", ":")).encode()))
+        if rec.get("index"):
+            got += 1
+            for t, c in rec["index"]:
+                exact[float(t)] = float(c)
+        if i % 300 == 0:
+            print(f"   {i}/{len(markets)} · events with Kalshi settlement prices: {got}", flush=True)
+        if tried >= 40 and got == 0:
+            print("   Kalshi /live_data has no readable Gold prices (first 40 events) - using the PAXG proxy.")
+            break
+    if got >= len(markets) // 2:
+        rows = sorted(exact.items())
+        (cache / "pyth_xau_kalshi.json.gz").write_bytes(gzip.compress(json.dumps([list(r) for r in rows]).encode()))
+        spot = [SpotPrice("GOLD", c, datetime.fromtimestamp(t, UTC), "kalshi_pyth") for t, c in rows]
+        print(f"   ✅ exact settlement-source prices from Kalshi: {len(spot):,} minutes ({got} events)")
+        await _compare(dl, series, markets, spot, "Kalshi/Pyth (exact)")
+        return
+    # 2nd choice: PAXG (Paxos Gold, 1 token = 1 fine troy oz) 1-minute candles from Coinbase - real and
+    # timestamped, but NOT the settlement source, so its basis is measured below.
     hist = CoinbaseHistory(cache)
     days_list = sorted({(parse_ts(m["close_time"]) or until).date() for m in markets})
     spot = []
@@ -154,6 +220,13 @@ async def validate_model(client: KalshiClient, provider: KalshiGoldFeed, series:
             print("   ⚠️ The proxy disagrees with settlement too often: model results below are unreliable.")
     rows = [[p.ts.timestamp(), p.price] for p in spot]
     (cache / "pyth_xau_proxy_paxg.json.gz").write_bytes(gzip.compress(json.dumps(rows).encode()))
+    await _compare(dl, series, markets, spot, "PAXG proxy")
+
+
+async def _compare(dl: HistoryDownloader, series: str, markets: list, spot: list, label: str) -> None:
+    """Fair-value model on ``spot`` vs Kalshi's own prices (Brier + calibration)."""
+    recs = [r for r in [await dl.market_data(series, m) for m in markets] if r]
+    print(f"   price source: {label}")
     points = []
     for rec in recs:
         mk = rec["market"]
@@ -165,7 +238,7 @@ async def validate_model(client: KalshiClient, provider: KalshiGoldFeed, series:
         points += build_points(mk["ticker"], "GOLD", float(strike), close, mk["result"], quotes, spot)
     b_model, b_mid, n = brier(points)
     if not n:
-        print("   no comparable minutes (missing PAXG history or quotes)")
+        print("   no comparable minutes (missing price history or quotes)")
         return
     print(f"   Brier: model {b_model:.4f} vs Kalshi mid {b_mid:.4f} over {n:,} minutes "
           f"({len({p.ticker for p in points})} markets)")
@@ -179,9 +252,12 @@ async def validate_model(client: KalshiClient, provider: KalshiGoldFeed, series:
               "(scripts/model_compare.py --asset GOLD). Still research-only.")
 
 
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--days", type=int, default=0)
+    ap.add_argument("--dump-live", action="store_true",
+                    help="print Kalshi's raw /live_data reply for the newest Gold events (to inspect its layout)")
     ap.add_argument("--categories", default=None, help="comma list of Kalshi categories to search")
     return asyncio.run(main_async(ap.parse_args()))
 
