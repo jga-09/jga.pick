@@ -37,7 +37,7 @@ ACTIONS: dict[str, tuple[int, ...]] = {
     "exp": (0,), "filt": (0,), "feat": (0,),
     "btc": (0,), "bwhy": (1,), "banl": (0,), "bcal": (0,), "bt": (0,),
     "kacct": (0,), "keyset": (0,), "keydel": (0,),
-    "clear": (0,), "estop": (0,), "estopok": (0,), "ereset": (0,), "eresetok": (0,), "pnl": (0,),
+    "clear": (0,), "clearok": (0,), "tidy": (0,), "estop": (0,), "estopok": (0,), "ereset": (0,), "eresetok": (0,), "pnl": (0,),
     "asset": (1,), "orders": (0,), "models": (0,),
 }
 CARD_ASSETS = ("BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "GOLD")
@@ -246,6 +246,24 @@ class CallbackRouter:
         return Response(M.position_settings(self.rt))
 
     async def _on_clear(self, uid: int) -> Response:
+        """Ask first: resetting paper trading cannot be undone from Telegram."""
+        rt = self.rt
+        n_closed = rt.repo.count_closed("paper")
+        n_open = len(rt.portfolio.open_positions("paper"))
+        text = ("🧹 <b>CLEAR &amp; RESET PAPER?</b>\n\n"
+                f"This deletes {n_closed} closed and {n_open} open <b>paper</b> trades and resets the paper balance "
+                f"to <b>${rt.settings.paper_starting_balance:,.2f}</b>.\n\n"
+                "Kept: live trades, settings, research data. A database backup is saved first.")
+        buttons = [[("✅ Yes, reset paper", "clearok")], [("🧽 Just tidy the chat", "tidy"), ("❌ Cancel", "home")]]
+        return Response(Screen(text, buttons, route="home"))
+
+    async def _on_clearok(self, uid: int) -> Response:
+        res = self.rt.reset_paper_account(by=uid)
+        c = res["counts"]
+        return Response(M.home(self.rt), clear=True, alert=True,
+                        toast=f"🧹 Paper reset: {c['positions']} trades removed. Balance ${res['balance']:,.2f}")
+
+    async def _on_tidy(self, uid: int) -> Response:
         return Response(M.home(self.rt), toast="🧹 Cleared", clear=True)
 
     # ------------------------------------------------------------ control

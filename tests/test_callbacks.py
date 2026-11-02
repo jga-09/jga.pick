@@ -117,3 +117,26 @@ async def test_all_screens_render(runtime, router):
             assert 1 <= len(row) <= 2
             for _, data in row:
                 parse_callback(data)  # every button we render must pass our own validation
+
+
+async def test_clear_asks_then_resets_paper_only(runtime, router):
+    from app.trading.positions import Position
+
+    runtime.store.update(running=True, risk_level=RiskLevel.HIGH)
+    info = make_info()
+    feed_history(runtime, info, "up")
+    t, _ = runtime.propose(info.ticker)
+    await runtime.execute_ticket(runtime.tickets.consume(t.id), confirmed=True)
+    live = runtime.portfolio.add_open(Position(mode="live", ticker="L1", event_ticker="E", asset="BTC", label="x",
+                                               side="yes", contracts=1, entry_price=50, entry_fee=0,
+                                               risk_level="low"))
+    resp = await router.handle(ADMIN_ID, "clear")
+    assert "RESET PAPER" in resp.screen.text and runtime.portfolio.open_positions("paper")  # nothing deleted yet
+    assert "Unauthorized" in (await router.handle(999, "clearok")).toast
+    resp = await router.handle(ADMIN_ID, "clearok")
+    assert resp.clear and "Paper reset" in resp.toast
+    assert not runtime.portfolio.open_positions("paper") and runtime.repo.count_closed("paper") == 0
+    assert runtime.portfolio.paper_balance() == runtime.settings.paper_starting_balance
+    assert live in runtime.portfolio.open_positions("live")  # live untouched
+    tidy = await router.handle(ADMIN_ID, "tidy")
+    assert tidy.clear and runtime.portfolio.open_positions("live")

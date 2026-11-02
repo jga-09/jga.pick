@@ -588,7 +588,7 @@ def settings(rt: BotRuntime, note: str = "") -> Screen:
         lines += ["", escape(note)]
     buttons = grid2([("🔑 Kalshi account", "kacct"), ("🛡 Risk level", "risk"),
                      ("🤖 Auto trade", "auto"), ("📝 Paper / Real", "mode"),
-                     ("🧠 How it works", "strat"), ("📊 Connections", "status")]) + [[("🧹 Tidy chat", "clear"), HOME]]
+                     ("🧠 How it works", "strat"), ("📊 Connections", "status")]) + [[("🧹 Tidy chat", "tidy"), HOME]]
     return Screen("\n".join(lines), buttons, route="cfg")
 
 

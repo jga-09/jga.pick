@@ -7,6 +7,7 @@ the Kalshi client or the database directly.
 from __future__ import annotations
 
 import asyncio
+import shutil
 import html
 import json
 import logging
@@ -990,6 +991,32 @@ class BotRuntime:
                               "🚨 <b>POSITION CHECK vs KALSHI</b>\n" + body +
                               "\n\nMarkets the bot tracks with a mismatch are blocked for new orders.")
         return report
+
+    def reset_paper_account(self, by: int | None = None, keep_backups: int = 2) -> dict[str, Any]:
+        """Wipe PAPER history and balance (back to PAPER_STARTING_BALANCE). Live data and research are untouched.
+
+        The SQLite database is backed up first (only the newest ``keep_backups`` reset backups are kept)."""
+        if any(p.mode == "paper" for p in self.portfolio.open_positions()) and self.portfolio.inflight:
+            raise TradingError("an order is in flight - try again in a moment")
+        backup = None
+        url = self.settings.database_url
+        if url.startswith("sqlite:///"):
+            db_file = Path(url.split("sqlite:///", 1)[1])
+            if db_file.exists():
+                backup = db_file.with_name(f"{db_file.name}.reset-backup-{utcnow():%Y%m%d-%H%M%S}")
+                shutil.copy2(db_file, backup)
+                for old in sorted(db_file.parent.glob(f"{db_file.name}.reset-backup-*"))[:-keep_backups]:
+                    old.unlink(missing_ok=True)
+        counts = self.repo.reset_paper()
+        for pid, pos in list(self.portfolio.positions.items()):
+            if pos.mode == "paper":
+                del self.portfolio.positions[pid]
+        self.portfolio.last_trade_at.clear()
+        self.portfolio.last_loss_at = None
+        self.repo.add_event("PAPER_RESET", f"by={by} {counts}", "WARNING")
+        log_event(log, "PAPER_RESET", by=by, **counts)
+        return {"counts": counts, "backup": backup.name if backup else None,
+                "balance": self.portfolio.paper_balance()}
 
     async def send_daily_recap(self, now: datetime | None = None) -> str | None:
         """After each UTC day closes, send one recap of that day (once; survives restarts). Returns the day."""
