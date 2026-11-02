@@ -162,3 +162,38 @@ class PythGoldProvider:
 
     async def close(self) -> None:
         await self.http.aclose()
+
+
+class KalshiGoldFeed:
+    """Gold price from Kalshi's OWN settlement data: GET /live_data/events/{event} returns the 1-minute Pyth
+    gold candles each KXGOLD15M event settles on. No third-party key; no basis between feed and settlement.
+
+    Needs the event ticker of the market being priced (``latest(client, event_ticker)``)."""
+
+    name = "kalshi_gold_index"
+    source = "pyth"  # what the rules name; this feed IS Kalshi's copy of it
+
+    def __init__(self, stale_after_sec: float = 120.0) -> None:
+        from app.data.settlement_index import SettlementIndexFeed
+
+        self._feed = SettlementIndexFeed(stale_sec=stale_after_sec)
+        self.last_error = ""
+
+    async def latest(self, client, event_ticker: str, now: datetime | None = None) -> SpotPrice | None:
+        now = now or utcnow()
+        spot = await self._feed.latest(client, event_ticker, now, asset="GOLD")
+        if spot is None:
+            closed = "" if session_open(now) else "; gold market closed"
+            self.last_error = (self._feed.last_error or "no recent settlement candles") + closed
+            return None
+        self.last_error = ""
+        return SpotPrice("GOLD", spot.price, spot.ts, "kalshi_pyth_index")
+
+    async def get_price(self, asset: str) -> SpotPrice | None:  # protocol: needs an event, see latest()
+        return None
+
+    def history(self, asset: str) -> list[SpotPrice]:
+        return []
+
+    async def close(self) -> None:
+        return None

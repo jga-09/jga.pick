@@ -47,10 +47,11 @@ def build_runtime(settings: Settings) -> BotRuntime:
     else:
         underlying = build_provider(settings.underlying_provider)
     gold = None
-    if settings.gold_enabled and settings.gold_pyth_feed_id and settings.data_source != "fixture":
-        from app.data.gold import PythGoldProvider
+    if settings.gold_enabled and settings.data_source != "fixture":
+        from app.data.gold import KalshiGoldFeed
 
-        gold = PythGoldProvider(settings.gold_pyth_feed_id, stale_after_sec=settings.gold_stale_sec)
+        # Kalshi's own copy of the Pyth candles the Gold markets settle on (Pyth's public API now needs a key)
+        gold = KalshiGoldFeed(stale_after_sec=settings.gold_stale_sec)
     rt = BotRuntime(settings, repo, client, underlying=underlying, profiles=load_profiles())
     rt.gold_provider = gold
     return rt

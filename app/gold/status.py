@@ -82,7 +82,8 @@ async def gold_status(client: Any, provider: Any, categories: list[str], now: da
     if st.market is None:
         st.problems.append("no open Gold market right now (gold markets may be closed outside trading hours)")
         return st
-    provider_source = "pyth" if provider is not None and getattr(provider, "name", "") == "pyth_gold" else None
+    name = getattr(provider, "name", "") if provider is not None else ""
+    provider_source = "pyth" if name in ("pyth_gold", "kalshi_gold_index") else None
     st.check = validate_gold_market(st.market, provider_source, now)
     st.problems.extend(st.check.problems)
     if st.spread is None:
@@ -90,9 +91,12 @@ async def gold_status(client: Any, provider: Any, categories: list[str], now: da
     elif st.spread > MAX_SPREAD_CENTS:
         st.problems.append(f"spread {st.spread:.0f}c wider than {MAX_SPREAD_CENTS:.0f}c")
     if provider is None:
-        st.price_problem = "no Gold price provider configured (set GOLD_PYTH_FEED_ID)"
+        st.price_problem = "no Gold price provider configured"
     else:
-        spot = await provider.get_price("GOLD")
+        if name == "kalshi_gold_index":  # Kalshi's own settlement candles for this event
+            spot = await provider.latest(client, st.market.event_ticker, now)
+        else:
+            spot = await provider.get_price("GOLD")
         if spot is None:
             st.price_problem = f"Gold price unavailable ({getattr(provider, 'last_error', '') or 'no data'})"
         else:

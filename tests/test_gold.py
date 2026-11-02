@@ -144,3 +144,31 @@ async def test_pyth_error_reports_status_and_retries_without_0x():
     p = PythGoldProvider(FEED, http=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     assert await p.get_price("GOLD") is None
     assert p.last_error.startswith("HTTP 404") and len(seen) == 2
+
+
+async def test_kalshi_gold_feed_uses_settlement_candles():
+    from app.data.gold import KalshiGoldFeed
+
+    now = datetime.now(UTC).replace(second=0, microsecond=0)
+    start_ms = int((now - timedelta(minutes=2)).timestamp() * 1000)
+    payload = {"live_data": {"details": {"candlesticks": {"1M": [
+        {"open_ts_ms": start_ms, "open": 3910, "high": 3912, "low": 3909, "close": 3911.5}]}}}}
+    client = MagicMock()
+    client.get_event_live_data = AsyncMock(return_value=payload)
+    feed = KalshiGoldFeed()
+    spot = await feed.latest(client, "KXGOLD15M-26NOV012130", now)
+    assert spot.price == 3911.5 and spot.source == "kalshi_pyth_index"
+    client.get_event_live_data = AsyncMock(return_value={})
+    assert await KalshiGoldFeed().latest(client, "E2", now) is None
+
+
+async def test_gold_status_with_kalshi_feed_is_ready():
+    from app.data.gold import KalshiGoldFeed
+
+    client = MagicMock()
+    client.get_series_list = AsyncMock(return_value=[{"ticker": "KXGOLD15M", "title": "Gold 15-minute"}])
+    client.get_markets = AsyncMock(return_value=[_raw()])
+    feed = KalshiGoldFeed()
+    feed.latest = AsyncMock(return_value=MagicMock(price=3911.0, ts=NOW))
+    st = await gold_status(client, feed, ["Commodities"], NOW)
+    assert st.ready and st.check.verified

@@ -5,9 +5,10 @@
 
 Step 1  Kalshi: list Gold series (from Kalshi's own /series), show each series' window, an open market's
         settlement rules, and whether ``validate_gold_market`` accepts it.
-Step 2  Pyth: find the XAU/USD feed id (so you can set GOLD_PYTH_FEED_ID) and check the latest price is fresh.
-Step 3  (--days) Model validation: download settled Gold markets (1-minute Kalshi candles) and Pyth 1-minute
-        history, price every minute with a driftless log-normal model, and compare its accuracy (Brier score)
+Step 2  Price: Kalshi's own copy of the Pyth gold candles (GET /live_data/events/{event}) for the open market.
+        (Pyth's public Hermes API now answers 401 without a key, so it is no longer used.)
+Step 4  (--days) Model validation: download settled Gold markets (1-minute Kalshi candles) and, per event, the
+        1-minute Pyth settlement candles from Kalshi, price every minute with a driftless log-normal model, and compare its accuracy (Brier score)
         with Kalshi's own prices. If Kalshi is at least as accurate, there is no model edge to trade.
 Nothing is assumed: if Kalshi has no 15-minute Gold series, the output says so.
 """
@@ -24,10 +25,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import httpx
 
 from app.config import Settings
-from app.data.gold import HERMES, PythGoldProvider
+from app.data.gold import KalshiGoldFeed
+from app.data.settlement_index import compact, parse_index_bars
 from app.data.underlying import SpotPrice
 from app.errors import KalshiError
 from app.gold.markets import (
@@ -44,22 +45,9 @@ from app.utils.time import parse_ts
 ROOT = Path(__file__).resolve().parents[1]
 
 
-async def find_pyth_feeds(http: httpx.AsyncClient) -> list[dict]:
-    r = await http.get(f"{HERMES}/v2/price_feeds", params={"query": "XAU", "asset_type": "metal"})
-    r.raise_for_status()
-    out = []
-    for f in r.json():
-        attrs = f.get("attributes") or {}
-        if "XAU" in str(attrs.get("symbol", "")).upper():
-            out.append({"id": "0x" + str(f.get("id", "")).removeprefix("0x"), "symbol": attrs.get("symbol"),
-                        "description": attrs.get("description")})
-    return out
-
-
 async def main_async(a: argparse.Namespace) -> int:
     s = Settings()
     client = KalshiClient(s)  # public market data needs no key
-    http = httpx.AsyncClient(timeout=20)
     try:
         cats = [c.strip() for c in (a.categories or s.gold_categories).split(",") if c.strip()]
         print("STEP 1 - Kalshi Gold series")
@@ -76,24 +64,7 @@ async def main_async(a: argparse.Namespace) -> int:
         fifteen = [x for x in series if frequency_minutes(x) == 15]
         print(f"   15-minute Gold series: {', '.join(x['ticker'] for x in fifteen) or 'NONE'}")
 
-        print("\nSTEP 2 - Pyth XAU/USD feed")
-        feed_id = s.gold_pyth_feed_id
-        try:
-            feeds = await find_pyth_feeds(http)
-            for f in feeds[:6]:
-                print(f"   {f['symbol']:<22} {f['id']}  {f.get('description') or ''}")
-            spot_feed = next((f for f in feeds if str(f["symbol"]).upper().endswith("XAU/USD")), None)
-            if not feed_id and spot_feed:
-                feed_id = spot_feed["id"]
-                print(f"   -> add to .env:  GOLD_PYTH_FEED_ID={feed_id}")
-        except (httpx.HTTPError, ValueError) as exc:
-            print(f"   ⚠️ Pyth lookup failed ({type(exc).__name__})")
-        provider = PythGoldProvider(feed_id, stale_after_sec=s.gold_stale_sec) if feed_id else None
-        if provider:
-            spot = await provider.get_price("GOLD")
-            print(f"   latest: {spot.price:.2f} at {spot.ts:%Y-%m-%d %H:%M:%S} UTC" if spot
-                  else f"   latest: unavailable ({provider.last_error})")
-
+        provider = KalshiGoldFeed(stale_after_sec=s.gold_stale_sec)
         print("\nSTEP 3 - open market rules check")
         target = fifteen or series
         for ser in target[:3]:
@@ -106,22 +77,24 @@ async def main_async(a: argparse.Namespace) -> int:
                 print(f"   {ser['ticker']}: no open market right now")
                 continue
             info = parse_market_info(raws[0], asset="GOLD", series_ticker=ser["ticker"])
-            chk = validate_gold_market(info, "pyth" if provider else None, datetime.now(UTC))
+            chk = validate_gold_market(info, provider.source, datetime.now(UTC))
             print(f"   {info.ticker}: strike_type={info.strike_type} strike={info.floor_strike or info.cap_strike}")
             print(f"     rules: {info.rules_primary[:300]}")
             print(f"     {'✅ VERIFIED' if chk.verified else '❌ ' + '; '.join(chk.problems)}  (source: {chk.source})")
+            spot = await provider.latest(client, info.event_ticker)
+            print("     price (Kalshi settlement candles): "
+                  + (f"{spot.price:,.2f} at {spot.ts:%H:%M} UTC" if spot else f"unavailable ({provider.last_error})"))
 
-        if a.days and fifteen and provider:
+        if a.days and fifteen:
             await validate_model(client, provider, fifteen[0]["ticker"], a.days)
         elif a.days:
-            print("\nSTEP 4 skipped: needs a 15-minute Gold series AND a Pyth feed id.")
+            print("\nSTEP 4 skipped: no 15-minute Gold series.")
     finally:
         await client.close()
-        await http.aclose()
     return 0
 
 
-async def validate_model(client: KalshiClient, provider: PythGoldProvider, series: str, days: int) -> None:
+async def validate_model(client: KalshiClient, provider: KalshiGoldFeed, series: str, days: int) -> None:
     print(f"\nSTEP 4 - model validation on settled {series} markets (last {days} days)")
     cache = ROOT / "data" / "gold_cache"
     dl = HistoryDownloader(client, cache, trades=False)
@@ -131,15 +104,37 @@ async def validate_model(client: KalshiClient, provider: PythGoldProvider, serie
     print(f"   settled markets: {len(markets)}")
     if not markets:
         return
-    spot_file = cache / f"pyth_xau_{since:%Y%m%d}_{until:%Y%m%d}.json.gz"
-    if spot_file.exists():
-        rows = json.loads(gzip.decompress(spot_file.read_bytes()))
-    else:
-        bars = await provider.bars(since - timedelta(hours=2), until)
-        rows = [[b.ts.timestamp(), b.close] for b in bars]
-        spot_file.write_bytes(gzip.compress(json.dumps(rows).encode()))
-    spot = [SpotPrice("GOLD", float(c), datetime.fromtimestamp(t, UTC), "pyth") for t, c in rows]
-    print(f"   Pyth minutes: {len(spot):,}")
+    # per event: Kalshi's 1-minute Pyth settlement candles (cached inside each market file under "index")
+    spot_rows: dict[float, float] = {}
+    fetched = empty = failed = 0
+    for i, m in enumerate(markets, 1):
+        rec = await dl.market_data(series, m)
+        if not rec:
+            continue
+        if "index" not in rec:
+            ev = (rec.get("market") or {}).get("event_ticker") or m.get("event_ticker")
+            try:
+                bars = parse_index_bars(await client.get_event_live_data(ev)) if ev else []
+            except KalshiError:
+                failed += 1
+                continue
+            fetched += 1
+            empty += 0 if bars else 1
+            rec["index"] = compact(bars)
+            (cache / f"{rec['market']['ticker']}.json.gz").write_bytes(
+                gzip.compress(json.dumps(rec, separators=(",", ":")).encode()))
+        for t, c in rec.get("index") or []:
+            spot_rows[float(t)] = float(c)
+        if i % 200 == 0:
+            print(f"   {i}/{len(markets)} markets · settlement candles fetched {fetched} ({empty} empty, "
+                  f"{failed} failed)", flush=True)
+    rows = sorted(spot_rows.items())
+    (cache / "pyth_xau_index.json.gz").write_bytes(gzip.compress(json.dumps([list(r) for r in rows]).encode()))
+    spot = [SpotPrice("GOLD", c, datetime.fromtimestamp(t, UTC), "kalshi_pyth_index") for t, c in rows]
+    print(f"   gold minutes from Kalshi settlement data: {len(spot):,} ({failed} events failed, {empty} empty)")
+    if not spot:
+        print("   ❌ Kalshi returned no settlement candles for past Gold events - cannot validate a model.")
+        return
     points = []
     for m in markets:
         rec = await dl.market_data(series, m)
