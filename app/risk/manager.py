@@ -19,7 +19,7 @@ from app.utils.time import utcnow
 
 log = logging.getLogger(__name__)
 # Assets the bot may observe but must never trade until a pricing model is validated for them.
-RESEARCH_ONLY_ASSETS = frozenset({"GOLD", "XAU"})
+RESEARCH_ONLY_ASSETS = frozenset({"GOLD", "XAU", "SILVER", "XAG", "OIL", "WTI", "BRENT", "COPPER", "NATGAS"})
 
 
 @dataclass(frozen=True)
