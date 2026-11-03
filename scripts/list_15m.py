@@ -77,7 +77,8 @@ async def main() -> int:
         for t, code, cat, n, vol, oi, src, crypto, spot, title in rows:
             cb = ("yes" if spot else "no") if crypto else "-"
             print(f"{t:<14} {code:<6} {cat[:12]:<12} {n:>4} {vol:>9,.0f} {oi:>9,.0f}  {cb:<8} {src[:30]} · {title[:40]}")
-        usable = [r[1] for r in rows if r[7] and r[3] > 0]
+        # single-coin crypto with open markets AND a Coinbase price (multi-coin "race"/"comparison" series excluded)
+        usable = [r[1] for r in rows if r[7] and r[3] > 0 and r[8]]
         print("\nCrypto series with open markets (can be scanned):", ", ".join(usable) or "none")
         print("To scan them (STRATEGY_MODE=quality or confirm): ASSETS=" + ",".join(usable))
         print("Non-crypto 15-minute series (e.g. Gold) are research-only in this bot - never traded.")

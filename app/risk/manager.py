@@ -20,6 +20,10 @@ from app.utils.time import utcnow
 log = logging.getLogger(__name__)
 # Assets the bot may observe but must never trade until a pricing model is validated for them.
 RESEARCH_ONLY_ASSETS = frozenset({"GOLD", "XAU", "SILVER", "XAG", "OIL", "WTI", "BRENT", "COPPER", "NATGAS"})
+# Only single-coin crypto 15-minute markets (CF Benchmarks settlement, Coinbase price feed) may ever be traded.
+# Anything else Kalshi lists at 15 minutes (FX, rates, indices, metals, energy, coin races) is never traded.
+TRADABLE_CRYPTO = frozenset({"BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE", "NEAR", "ZEC", "ADA", "BCH",
+                             "TON", "LTC", "AVAX", "LINK", "DOT", "SUI"})
 
 
 @dataclass(frozen=True)
@@ -102,8 +106,9 @@ class RiskManager:
         warnings: list[str] = []
         lvl = profile.level.title
 
-        if snap.info.asset.upper() in RESEARCH_ONLY_ASSETS:
-            fails.append(f"{snap.info.asset} is research-only (no validated pricing model) - never traded")
+        if snap.info.asset.upper() in RESEARCH_ONLY_ASSETS or snap.info.asset.upper() not in TRADABLE_CRYPTO:
+            fails.append(f"{snap.info.asset} is research-only (not a supported single-coin crypto market) - "
+                         "never traded")
         if not ctx.trading_enabled:
             fails.append(f"Trading disabled: {ctx.disabled_reason}")
         if not ctx.mode_permitted:

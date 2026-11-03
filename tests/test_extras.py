@@ -77,3 +77,14 @@ def test_coin_commands_exist(cmd):
     from app.telegram.handlers import COMMAND_ROUTES
 
     parse_callback(COMMAND_ROUTES[cmd])
+
+
+def test_only_single_coin_crypto_can_ever_be_traded(runtime):
+    from dataclasses import replace
+
+    for asset, ok in (("XRP", True), ("HYPE", True), ("EURUSD", False), ("SILVER", False), ("CRYPTOLEAD", False)):
+        info = replace(make_info(), asset=asset)
+        sig = feed_history(runtime, info, "up")
+        dec = runtime.check_risk(sig, runtime.market_data.latest[info.ticker])
+        blocked = any("research-only" in f for f in dec.failures)
+        assert blocked is (not ok), asset

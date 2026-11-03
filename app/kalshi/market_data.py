@@ -25,6 +25,9 @@ ASSET_ALIASES: dict[str, tuple[str, ...]] = {
     "XRP": ("XRP", "RIPPLE"),
     "DOGE": ("DOGE", "DOGECOIN"),
     "BNB": ("BNB", "BINANCE COIN"),
+    "HYPE": ("HYPE", "HYPERLIQUID"),
+    "ZEC": ("ZEC", "ZCASH"),
+    "NEAR": ("NEAR",),
     "GOLD": ("GOLD", "XAU"),  # research only - never traded (see app/risk/manager.RESEARCH_ONLY_ASSETS)
 }
 ASSET_ICONS = {"BTC": "₿", "ETH": "Ξ", "SOL": "◎", "XRP": "✕", "DOGE": "Ð", "BNB": "🔶", "GOLD": "🥇"}
