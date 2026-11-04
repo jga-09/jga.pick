@@ -358,6 +358,17 @@ Exits ("when in doubt, cash out") are the existing `EARLY_EXIT`, `TAKE_PROFIT_*`
 Test the guide's approaches A, B and D on your downloaded history before relying on them:
 `python scripts/guide_test.py` (earlier days vs the untouched last 7 days, after fees). Paper only.
 
+## 15c-3. Fair-value forward test on HYPE and DOGE (paper only)
+
+`STRATEGY_MODE=btc` now runs the fair-value engine on every coin in `ASSETS`. Each coin gets its own Coinbase feed
+and its own calibration, and any coin other than BTC is **paper only**: the risk manager refuses live orders for
+it. `FAIR_VALUE_PURE=true` makes the bot trade exactly the rule `scripts/guide_test.py` tested (point edge after
+fees, entry 5-95¢, no momentum/regime filters). It is never allowed live either.
+
+Pass/fail rules, fixed before the test: **PASS** = 14+ days, 150+ markets and a 95% range above zero after fees;
+**FAIL** = a range entirely below zero, or 28+ days without a positive average. Check progress with
+`docker exec kalshi-directional-bot python scripts/forward_report.py`.
+
 ## 15d. Advanced upgrade: per-asset models, Gold research, live-order safety
 
 See `docs/AUDIT.md` for everything found and fixed. In short:

@@ -10,10 +10,7 @@ taker fee + slippage, held to settlement):
      left (minus the 60-second settlement average) and the last 60 minutes' realized volatility. Buy the first side
      whose edge after fees >= EDGE cents.  Variants: any time (1.5-14 min left) vs MID-WINDOW only (5-11 min left
      = minutes 4-10), EDGE 3c vs 6c.
-  B  Late-window favourite: with 5 min left, buy the side priced 60-80c when spot is on that side of the strike
-     AND the last 5 minutes moved that way.
-  D  Mean reversion of extremes: 5-10 min left, the last 5 minutes moved > 2 sigma and pushed a side to <= 15c ->
-     buy that cheap side.
+  (B late favourite and D mean reversion were tested on 22,000 markets, lost after fees, and were dropped.)
   (C, final-minute locked average, needs second-by-second data and speed - not testable on 1-minute candles.)
 
 Each line shows trades, win rate, average P&L per trade (cents, after fees) with a 95% bootstrap range, on the
@@ -113,34 +110,6 @@ def rule_a(m, q, sp, lo_min, hi_min, edge, slip):
     return None
 
 
-def rule_b(m, q, sp, slip):
-    at = m["close"] - timedelta(minutes=5)
-    if at not in q or (i := sp.at(at)) is None:
-        return None
-    bid, ask = q[at]
-    up = sp.close[i] >= float(m["strike"]) and sp.ret(i, 5) > 0
-    down = sp.close[i] < float(m["strike"]) and sp.ret(i, 5) < 0
-    if up and 60 <= ask <= 80:
-        return "yes", ask
-    if down and 60 <= 100 - bid <= 80:
-        return "no", 100 - bid
-    return None
-
-
-def rule_d(m, q, sp, slip):
-    for k in range(10, 4, -1):
-        at = m["close"] - timedelta(minutes=k)
-        if at not in q or (i := sp.at(at)) is None:
-            continue
-        z = sp.ret(i, 5) / (sp.sigma_per_sec(i) * math.sqrt(300) or 1e-9)
-        bid, ask = q[at]
-        if z > 2 and 100 - bid <= 15 and 100 - bid >= 3:  # big up move, NO is cheap -> buy NO
-            return "no", 100 - bid
-        if z < -2 and 3 <= ask <= 15:
-            return "yes", ask
-    return None
-
-
 def run(asset: str, cache: Path, slip: float, holdout_days: int, totals: dict) -> None:
     bars = load_crypto_bars(cache, asset)
     markets = [m for m in load_markets(cache, f"KX{asset}15M-") if m["result"] in ("yes", "no") and m["strike"]]
@@ -154,8 +123,6 @@ def run(asset: str, cache: Path, slip: float, holdout_days: int, totals: dict) -
         "A fair value, any time, edge>=6c": lambda m, q: rule_a(m, q, sp, 2, 14, 6, slip),
         "A fair value, MID-window, edge>=3c": lambda m, q: rule_a(m, q, sp, 5, 11, 3, slip),
         "A fair value, MID-window, edge>=6c": lambda m, q: rule_a(m, q, sp, 5, 11, 6, slip),
-        "B late favourite 60-80c @5min": lambda m, q: rule_b(m, q, sp, slip),
-        "D mean reversion (cheap side)": lambda m, q: rule_d(m, q, sp, slip),
     }
     print(f"\n=== {asset} · {len(markets)} settled markets · slippage {slip:g}c ===")
     for name, rule in rules.items():

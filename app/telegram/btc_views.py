@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 from app import DISPLAY_NAME
 from app.research.btc_backtest import load_report
 from app.strategy.btc_decision import NoTrade
+from app.kalshi.market_data import ASSET_ICONS
 from app.telegram.keyboards import Button, Screen
 from app.trading.positions import Position
 from app.utils.time import utcnow
@@ -42,11 +43,11 @@ FRIENDLY: dict[NoTrade, str] = {
     NoTrade.POSITION_LIMIT: "Already holding the maximum number of trades",
     NoTrade.EXCESSIVE_SPREAD: "Buy and sell prices are too far apart",
     NoTrade.INSUFFICIENT_LIQUIDITY: "Not enough contracts for sale at this price",
-    NoTrade.UNFAVORABLE_REGIME: "BTC is too choppy right now",
+    NoTrade.UNFAVORABLE_REGIME: "The price is too choppy right now",
     NoTrade.EXCESSIVE_UNCERTAINTY: "The bot isn't sure enough",
-    NoTrade.CONFLICT: "BTC and the Kalshi price disagree",
+    NoTrade.CONFLICT: "The coin and the Kalshi price disagree",
     NoTrade.PRICE_REFLECTS_MOVE: "The price already moved - too late to get in",
-    NoTrade.WEAK_DIRECTION: "BTC isn't moving clearly in one direction",
+    NoTrade.WEAK_DIRECTION: "The price isn't moving clearly in one direction",
     NoTrade.LONGSHOT: "Cheap long-shot contract - on Kalshi these lose money on average",
     NoTrade.INSUFFICIENT_EV: "Price is too high for the odds (not enough profit after fees)",
     NoTrade.INSUFFICIENT_EVIDENCE: "Still learning - needs more finished markets first",
@@ -87,8 +88,11 @@ def _n(k: int, word: str) -> str:
 
 
 def _big(v: float | None) -> str:
-    """BTC-sized dollar amounts without cents ($60,300)."""
-    return NA if v is None else f"${v:,.0f}"
+    """Coin prices at a sensible precision: $60,300 · $42.18 · $0.1834."""
+    if v is None:
+        return NA
+    a = abs(v)
+    return f"${v:,.0f}" if a >= 1000 else f"${v:,.2f}" if a >= 10 else f"${v:,.4f}"
 
 
 def _usd(v: float | None, signed: bool = True) -> str:
@@ -147,26 +151,37 @@ def reasons(btc: Any, decision: Any, limit: int = 3) -> list[str]:
 
 
 def btc_view(rt: BotRuntime) -> MarketView | None:
-    return next((v for v in rt.markets() if v.info.asset == "BTC"), None)
+    """The market the dashboard shows: one we hold, else an approved setup, else the first coin in ASSETS."""
+    views = [v for v in rt.markets() if v.info.asset.upper() in (rt.settings.asset_list or ["BTC"])]
+    held = {p.ticker for p in rt.portfolio.open_positions(rt.state.mode)}
+    for pick in (lambda v: v.info.ticker in held, lambda v: bool(v.decision and v.decision.approved)):
+        hit = next((v for v in views if pick(v)), None)
+        if hit:
+            return hit
+    return views[0] if views else None
+
+
+def _coin(v: MarketView | None) -> str:
+    return (v.info.asset.upper() if v else "") or "BTC"
 
 
 def _question(b: Any, v: MarketView) -> str:
     t = b.terms if b else None
     when = _clock(v.info.close_time)
     if t is None or t.threshold is None or t.kind is None:
-        return f"BTC market closing {when}"
+        return f"{_coin(v)} market closing {when}"
     word = "above" if t.kind == "above" else "below"
-    return f"Will BTC be {word} <b>{_big(t.threshold)}</b> at {when}?"
+    return f"Will {_coin(v)} be {word} <b>{_big(t.threshold)}</b> at {when}?"
 
 
 def _btc_vs_target(b: Any) -> str:
-    f = b.features
+    f, coin = b.features, b.terms.asset
     if f.spot is None or b.terms.threshold is None:
-        return f"BTC {_big(f.spot)}"
+        return f"{coin} {_big(f.spot)}"
     diff = f.spot - b.terms.threshold
-    if abs(diff) < 0.5:
-        return f"BTC {_big(f.spot)} · right at the target"
-    return f"BTC {_big(f.spot)} · {_big(abs(diff))} {'above' if diff > 0 else 'below'} target"
+    if abs(diff) < 0.5e-4 * b.terms.threshold:
+        return f"{coin} {_big(f.spot)} · right at the target"
+    return f"{coin} {_big(f.spot)} · {_big(abs(diff))} {'above' if diff > 0 else 'below'} target"
 
 
 def _dot(ok: bool | None) -> str:
@@ -251,7 +266,7 @@ def home(rt: BotRuntime) -> Screen:
     elif not st.running:
         status_line = "⚪ Offline — press 🟢 Start"
     elif v is None:
-        status_line = "🔍 Searching for the next BTC 15M market"
+        status_line = "🔍 Searching for the next 15M market"
     elif approved:
         status_line = "🟢 Online — trade setup active"
     else:
@@ -322,7 +337,7 @@ def signal(rt: BotRuntime) -> Screen:
     v = btc_view(rt)
     nav = [[("🔄 Refresh", "btc"), HOME]]
     if v is None or v.snapshot is None or v.signal is None or v.signal.btc is None:
-        return Screen("₿ <b>BTC SIGNAL</b>\n\nNo BTC 15-minute market data yet.\nThe bot keeps checking automatically.",
+        return Screen("₿ <b>15-MIN SIGNAL</b>\n\nNo 15-minute market data yet for " + "/".join(rt.settings.asset_list or ["BTC"]) + ".\nThe bot keeps checking automatically.",
                       nav, route="btc", refreshable=True)
     snap, b, d = v.snapshot, v.signal.btc, v.decision
     approved = bool(d and d.approved and b.edge)
@@ -331,7 +346,8 @@ def signal(rt: BotRuntime) -> Screen:
     vol = _level(f.vol_ratio, 0.7, 1.4, ("calm", "normal", "wild"))
     volume = _level(f.rel_volume, 0.6, 1.6, ("quiet", "normal", "busy"))
     lines = [
-        "₿ <b>BTC 15-MIN SIGNAL</b>",
+        f"{ASSET_ICONS.get(_coin(v), '🪙')} <b>{_coin(v)} 15-MIN SIGNAL</b>"
+        + ("  🧪 <i>paper forward test</i>" if _coin(v) != "BTC" else ""),
         _question(b, v),
         f"⏱ {_left(snap.time_remaining())} left",
         "",
@@ -350,7 +366,7 @@ def signal(rt: BotRuntime) -> Screen:
         lines.append(f"Signal strength: {_bar(b.strength / 100)} {b.strength}")
     lines += [
         "",
-        "<b>📈 What BTC is doing</b>",
+        f"<b>📈 What {_coin(v)} is doing</b>",
         f"Last 5 min: {_moving(f)}",
         f"Trend {trend} · moves {vol} · trading {volume}",
         f"Mood: {b.regime.badge.split(' ', 1)[1].title()}",

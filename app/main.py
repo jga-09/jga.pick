@@ -36,10 +36,16 @@ def build_runtime(settings: Settings) -> BotRuntime:
     repo = Repository(Database(settings.database_url))
     repo.init()
     if settings.strategy_mode == "btc":
-        from app.data.btc_feed import BTCFeed, FixtureBTCFeed
+        from app.data.btc_feed import BTCFeed, FixtureBTCFeed, MultiCoinFeed
 
         # Real Coinbase BTC-USD feed; fixture mode gets a synthetic, clearly labelled one.
-        underlying = FixtureBTCFeed() if settings.data_source == "fixture" else BTCFeed(settings.btc_feed_stale_sec)
+        coins = settings.asset_list or ["BTC"]
+        if settings.data_source == "fixture":
+            underlying = FixtureBTCFeed()
+        elif coins == ["BTC"]:
+            underlying = BTCFeed(settings.btc_feed_stale_sec)
+        else:  # fair value on several coins: one independent Coinbase feed per coin
+            underlying = MultiCoinFeed(coins, settings.btc_feed_stale_sec)
     elif settings.data_source == "fixture":
         from app.kalshi.fixtures import FixtureUnderlyingProvider
 

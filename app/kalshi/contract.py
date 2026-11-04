@@ -1,4 +1,4 @@
-"""What YES and NO actually mean for one Kalshi BTC contract.
+"""What YES and NO actually mean for one Kalshi 15-minute crypto contract (BTC, HYPE, DOGE, ...).
 
 The bot only trades a contract after this module has *verified* its outcome
 condition from Kalshi's own market fields:
@@ -21,11 +21,25 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from app.kalshi.market_data import MarketInfo
+from app.kalshi.market_data import ASSET_ALIASES, MarketInfo
 
 ABOVE_TYPES = {"greater", "greater_or_equal"}
 BELOW_TYPES = {"less", "less_or_equal"}
 _ASSET_WORDS = re.compile(r"\b(bitcoin|btc|brti|xbt)\b", re.I)
+# Coins the fair-value engine can model (single-coin crypto with a spot feed). Gold etc. stay research-only.
+FAIR_VALUE_ASSETS = frozenset(a for a in ASSET_ALIASES if a != "GOLD")
+
+
+def _asset_words(asset: str) -> re.Pattern[str]:
+    if asset == "BTC":
+        return _ASSET_WORDS
+    names = "|".join(re.escape(n) for n in ASSET_ALIASES.get(asset, (asset,)))
+    return re.compile(rf"\b({names})\b", re.I)
+
+
+def _name(asset: str) -> str:
+    names = ASSET_ALIASES.get(asset, (asset,))
+    return (names[1] if len(names) > 1 else names[0]).title()
 _ABOVE_WORDS = re.compile(r"\b(above|greater|higher|at or above|or more|exceeds?|over)\b", re.I)
 _BELOW_WORDS = re.compile(r"\b(below|less than|lower|under|or less)\b", re.I)
 _WORD_NUM = {"thirty": 30, "sixty": 60, "ninety": 90, "one minute": 60, "two minutes": 120, "five minutes": 300}
@@ -41,6 +55,7 @@ class ContractTerms:
     verified: bool
     problems: tuple[str, ...] = ()
     notes: tuple[str, ...] = ()
+    asset: str = "BTC"
 
     @property
     def yes_means(self) -> str:
@@ -48,14 +63,14 @@ class ContractTerms:
             return "unverified"
         avg = f" ({self.averaging_window_sec}s average)" if self.averaging_window_sec else ""
         word = "ABOVE" if self.kind == "above" else "BELOW"
-        return f"BTC settles {word} ${self.threshold:,.2f}{avg} per {self.settlement_source}"
+        return f"{self.asset} settles {word} ${self.threshold:,.2f}{avg} per {self.settlement_source}"
 
     @property
     def no_means(self) -> str:
         if self.kind is None or self.threshold is None:
             return "unverified"
         word = "AT OR BELOW" if self.kind == "above" else "AT OR ABOVE"
-        return f"BTC settles {word} ${self.threshold:,.2f}"
+        return f"{self.asset} settles {word} ${self.threshold:,.2f}"
 
     def direction_for_side(self, side: str) -> str:
         """UP/DOWN meaning of buying ``side`` ("yes"/"no") on this contract."""
@@ -90,8 +105,10 @@ def _averaging_window(text: str) -> tuple[int, str | None]:
 
 def _source(text: str) -> str:
     low = text.lower()
-    if "brti" in low or "real-time index" in low or "cf benchmarks" in low:
+    if "brti" in low:
         return "CF Benchmarks BRTI"
+    if "real-time index" in low or "cf benchmarks" in low:
+        return "CF Benchmarks Real-Time Index"
     return "Kalshi settlement source (unspecified in rules)"
 
 
@@ -103,8 +120,9 @@ def interpret_contract(info: MarketInfo, *, require_rules: bool = True,
     rules = f"{info.rules_primary} {info.rules_secondary}".strip()
     st = (info.strike_type or "").lower()
 
-    if info.asset != "BTC":
-        problems.append(f"not a Bitcoin market ({info.asset})")
+    asset = (info.asset or "").upper()
+    if asset not in FAIR_VALUE_ASSETS:
+        problems.append(f"not a supported single-coin crypto market ({info.asset})")
     kind: str | None = None
     threshold: float | None = None
     if st in ABOVE_TYPES:
@@ -121,10 +139,10 @@ def interpret_contract(info: MarketInfo, *, require_rules: bool = True,
 
     window = 0
     if rules:
-        if re.search(r"bitcoin\s*cash|\bbch\b", rules, re.I):
+        if asset == "BTC" and re.search(r"bitcoin\s*cash|\bbch\b", rules, re.I):
             problems.append("rules refer to Bitcoin Cash, not Bitcoin")
-        elif not _ASSET_WORDS.search(rules):
-            problems.append("rules text does not refer to Bitcoin")
+        elif not _asset_words(asset).search(rules):
+            problems.append(f"rules text does not refer to {_name(asset)}")
         has_up, has_down = bool(_ABOVE_WORDS.search(rules)), bool(_BELOW_WORDS.search(rules))
         if kind == "above" and has_down and not has_up:
             problems.append("rules text describes a BELOW condition but strike type says ABOVE")
@@ -151,4 +169,5 @@ def interpret_contract(info: MarketInfo, *, require_rules: bool = True,
         verified=not problems and kind is not None,
         problems=tuple(problems),
         notes=tuple(notes),
+        asset=asset or "BTC",
     )

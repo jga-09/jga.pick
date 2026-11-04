@@ -107,6 +107,10 @@ class BTCParams:
     max_entry_cents: float = 95.0
     conflict_kalshi_cents: float = 5.0
     conflict_mom_z: float = 1.0
+    # Pure fair value (FAIR_VALUE_PURE): exactly the rule tested in scripts/guide_test.py - gate on the point
+    # edge after fees, entry 5-95c, and NO momentum-strength / regime / conflict / late-move / width filters.
+    # Data health, time, spread, liquidity, calibration and every account limit still apply.
+    pure: bool = False
 
 
 @dataclass(frozen=True)
@@ -298,8 +302,11 @@ def decide(inp: BTCInputs, prm: BTCParams) -> BTCSignal:
                 no(NoTrade.INSUFFICIENT_TIME, p)
             elif "spot" in p:
                 no(NoTrade.STALE_DATA, p)
-    best = max(edges, key=lambda e: e.ev_low_cents) if edges else None
-    if best is not None and best.ev_low_cents <= 0:
+    def gate(e: SideEdge) -> float:
+        return e.ev_cents if prm.pure else e.ev_low_cents
+
+    best = max(edges, key=gate) if edges else None
+    if best is not None and gate(best) <= 0:
         # No side has value: report the side the MODEL favours (not the "least bad" price).
         best = max(edges, key=lambda e: e.p_point)
     leaning = terms.direction_for_side(best.side) if best and terms.kind else "WAIT"
@@ -323,9 +330,9 @@ def decide(inp: BTCInputs, prm: BTCParams) -> BTCSignal:
             no(NoTrade.INSUFFICIENT_EV, f"entry {best.ask:.0f}¢ > {prm.max_entry_cents:.0f}¢ maximum")
 
     # ---- regime & uncertainty ---------------------------------------------
-    if inp.regime.value in prm.blocked_regimes:
+    if inp.regime.value in prm.blocked_regimes and not (prm.pure and inp.regime.value != "INSUFFICIENT_DATA"):
         no(NoTrade.UNFAVORABLE_REGIME, inp.regime.badge)
-    if est.width is not None and est.width > prm.max_prob_width:
+    if est.width is not None and est.width > prm.max_prob_width and not prm.pure:
         no(NoTrade.EXCESSIVE_UNCERTAINTY, f"probability range {est.width * 100:.0f} pts > "
                                           f"{prm.max_prob_width * 100:.0f}")
 
@@ -333,23 +340,25 @@ def decide(inp: BTCInputs, prm: BTCParams) -> BTCSignal:
     if best is not None:
         d = 1.0 if leaning == "UP" else -1.0
         km = inp.kalshi_move_5m
-        if km is not None and f.mom_z_5m is not None:
+        if km is not None and f.mom_z_5m is not None and not prm.pure:
             k_up = km if terms.kind == "above" else -km  # Kalshi move expressed as UP-direction cents
             if (abs(km) >= prm.conflict_kalshi_cents and abs(f.mom_z_5m) >= prm.conflict_mom_z
                     and k_up * f.mom_z_5m < 0):
                 no(NoTrade.CONFLICT, f"BTC {f.ret_5m_bps:+.0f} bps vs Kalshi YES {km:+.0f}¢ over 5 min")
         side_move = (km if best.side == "yes" else -km) if km is not None else None
-        if side_move is not None and side_move >= prm.max_late_move_cents and best.ev_low_cents < 2 * prm.min_ev_cents:
+        if prm.pure:
+            pass
+        elif side_move is not None and side_move >= prm.max_late_move_cents and best.ev_low_cents < 2 * prm.min_ev_cents:
             no(NoTrade.PRICE_REFLECTS_MOVE, f"{best.side.upper()} already +{side_move:.0f}¢ in 5 min; "
                                             f"remaining edge {best.ev_low_cents:+.1f}¢")
         elif best.ask >= 75 and f.momentum_state in ("WEAKENING", "REVERSING") and d * (f.mom_z_5m or 0) > 0:
             no(NoTrade.PRICE_REFLECTS_MOVE, f"{best.ask:.0f}¢ entry while momentum is "
                                             f"{f.momentum_state.lower()}")
-        if strength < prm.min_strength:
+        if strength < prm.min_strength and not prm.pure:
             no(NoTrade.WEAK_DIRECTION, f"strength {strength} < {prm.min_strength}")
-        if best.ev_low_cents < prm.min_ev_cents:
-            no(NoTrade.INSUFFICIENT_EV, f"net edge (conservative) {best.ev_low_cents:+.1f}¢ < "
-                                        f"{prm.min_ev_cents:+.1f}¢")
+        if gate(best) < prm.min_ev_cents:
+            no(NoTrade.INSUFFICIENT_EV, f"net edge ({'point' if prm.pure else 'conservative'}) "
+                                        f"{gate(best):+.1f}¢ < {prm.min_ev_cents:+.1f}¢")
     elif est.ok:
         no(NoTrade.INSUFFICIENT_EV, "no executable ask on either side")
 

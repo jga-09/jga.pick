@@ -128,7 +128,8 @@ class BotRuntime:
                                    config=self.strategy_config)
         self.btc_mode = settings.strategy_mode == "btc"
         self.btc_cfg = ModelConfig(sigma_window_min=settings.btc_sigma_window_min, basis_bps=settings.btc_basis_bps)
-        self.calibration: CalibrationReport | None = None
+        self.calibration: CalibrationReport | None = None  # BTC's (or the first coin's), for the dashboard
+        self.calibrations: dict[str, CalibrationReport] = {}
         self.reconcile_report: ReconcileReport | None = None
         self.gold_provider: Any = None  # PythGoldProvider when GOLD_ENABLED + GOLD_PYTH_FEED_ID (research only)
         self.gold: GoldStatus | None = None
@@ -148,6 +149,7 @@ class BotRuntime:
         self.risk = RiskManager(PositionSizer(settings.fee_rate), settings.stale_data_sec,
                                 settings.order_price_tolerance_cents, ev_gate=settings.ev_gate,
                                 strategy_mode=settings.strategy_mode, kelly_sizing=settings.kelly_sizing,
+                                fair_value_pure=settings.fair_value_pure,
                                 session=SessionRules(
                                     entry_min_left_sec=settings.entry_min_left_sec,
                                     entry_max_left_sec=settings.entry_max_left_sec,
@@ -473,8 +475,13 @@ class BotRuntime:
             max_late_move_cents=p.max_late_move_cents, require_calibration=p.require_known_ev,
             fee_rate=s.fee_rate, slippage_cents=s.paper_slippage_cents, kalshi_stale_sec=s.stale_data_sec,
             btc_stale_sec=s.btc_feed_stale_sec, max_skew_sec=s.max_data_skew_sec,
-            min_entry_cents=p.min_entry_price_cents, max_entry_cents=p.max_entry_price_cents,
+            min_entry_cents=5.0 if s.fair_value_pure else p.min_entry_price_cents,
+            max_entry_cents=95.0 if s.fair_value_pure else p.max_entry_price_cents,
+            pure=s.fair_value_pure,
         )
+
+    def calibration_for(self, asset: str) -> CalibrationReport | None:
+        return self.calibrations.get(asset.upper())
 
     def _kalshi_move(self, ticker: str, now: datetime, window: float = 300) -> float | None:
         hist = [p for p in self.engine.history(ticker) if p.ts <= now]
@@ -490,12 +497,15 @@ class BotRuntime:
         now = now or utcnow()
         terms = interpret_contract(snap.info, require_rules=self.settings.require_settlement_rules)
         feed = self.underlying
+        asset = (snap.info.asset or "BTC").upper()
         if spot is None and self.settings.btc_spot_source == "index" and not self.fixture_mode:
-            spot = await self.settlement_index.latest(self.client, snap.info.event_ticker, now)
+            spot = await self.settlement_index.latest(self.client, snap.info.event_ticker, now, asset)
         if spot is None:
-            spot = await feed.get_price("BTC")
+            spot = await feed.get_price(asset)
+        if spot is not None and spot.asset.upper() != asset:
+            spot = None  # never price one coin with another coin's feed
         bars_fn = getattr(feed, "bars", None)
-        bars = bars_fn() if callable(bars_fn) else []
+        bars = bars_fn(asset) if callable(bars_fn) else []
         t_left = snap.time_remaining(now)
         price = spot.price if spot is not None else None
         feats = compute_btc_features(bars, price, now, self.btc_cfg, terms.threshold, t_left,
@@ -510,7 +520,7 @@ class BotRuntime:
             liquidity={"yes": snap.ask_liquidity("yes") if book else None,
                        "no": snap.ask_liquidity("no") if book else None},
             kalshi_move_5m=self._kalshi_move(snap.ticker, now),
-            calibration=self.calibration.state if self.calibration else UNCALIBRATED,
+            calibration=self.calibration_for(asset).state if self.calibration_for(asset) else UNCALIBRATED,
             paused_reason=paused, live=self.state.mode == "live",
         )
         return decide(inp, self.btc_params())
@@ -518,8 +528,14 @@ class BotRuntime:
     # -------------------------------------------------------------- research
     def _build_model(self) -> HistoricalModel:
         if self.btc_mode:
-            self.calibration = calibration_report(self.repo.observations(source="btc"),
-                                                  self.settings.hist_min_samples, self.settings.calibration_ece_tol)
+            # one calibration per coin: BTC's track record never vouches for HYPE or DOGE
+            obs = self.repo.observations(source="btc")
+            self.calibrations = {
+                a: calibration_report([o for o in obs if str(getattr(o, "asset", "")).upper() == a],
+                                      self.settings.hist_min_samples, self.settings.calibration_ece_tol)
+                for a in self.settings.asset_list}
+            first = self.settings.asset_list[0] if self.settings.asset_list else "BTC"
+            self.calibration = self.calibrations.get("BTC") or self.calibrations.get(first)
         return HistoricalModel(
             self.repo.observations(source="live"), self.settings.hist_min_samples,
             self.settings.calibration_prior_strength, self.settings.fee_rate, self.settings.paper_slippage_cents,

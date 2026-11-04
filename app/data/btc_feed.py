@@ -82,14 +82,16 @@ def bars_to_spot(bars: list[MinuteBar], asset: str = "BTC", source: str = "coinb
 
 
 class BTCFeed:
-    """Coinbase Exchange BTC-USD feed. Implements the UnderlyingPriceProvider protocol."""
+    """Coinbase Exchange {ASSET}-USD feed (BTC by default). Implements the UnderlyingPriceProvider protocol."""
 
     name = "coinbase_exchange"
     BASE = "https://api.exchange.coinbase.com/products/BTC-USD"
     MAX_JUMP = 0.05  # reject a print >5% away from the previous one (data error, not a market move)
 
     def __init__(self, stale_after_sec: float = 15.0, timeout: float = 5.0, bar_refresh_sec: float = 30.0,
-                 http: httpx.AsyncClient | None = None, clock: Any = utcnow) -> None:
+                 http: httpx.AsyncClient | None = None, clock: Any = utcnow, asset: str = "BTC") -> None:
+        self.asset = asset.upper()
+        self.base = self.BASE if self.asset == "BTC" else f"https://api.exchange.coinbase.com/products/{self.asset}-USD"
         self.stale_after_sec = stale_after_sec
         self.bar_refresh_sec = bar_refresh_sec
         self._http = http or httpx.AsyncClient(timeout=timeout, headers={"User-Agent": "jgapicks-bot"})
@@ -105,7 +107,7 @@ class BTCFeed:
 
     # ------------------------------------------------------------ fetching
     async def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
-        r = await self._http.get(self.BASE + path, params=params)
+        r = await self._http.get(self.base + path, params=params)
         r.raise_for_status()
         return r.json()
 
@@ -117,7 +119,7 @@ class BTCFeed:
             bars = parse_candles(await self._get("/candles", {"granularity": 60}))
         except (httpx.HTTPError, ValueError) as exc:
             self._error = f"candles: {type(exc).__name__}"
-            log.warning("BTC_CANDLES_UNAVAILABLE error=%s", type(exc).__name__)
+            log.warning("SPOT_CANDLES_UNAVAILABLE asset=%s error=%s", self.asset, type(exc).__name__)
             return
         complete = [b for b in bars if b.ts <= now]  # drop the still-forming minute
         known = {b.ts for b in self._bars}
@@ -128,7 +130,7 @@ class BTCFeed:
         self._bars_at = now
 
     async def get_price(self, asset: str) -> SpotPrice | None:
-        if asset.upper() != "BTC":
+        if asset.upper() != self.asset:
             return None
         await self.refresh_bars()
         try:
@@ -140,15 +142,15 @@ class BTCFeed:
         except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
             self._failures += 1
             self._error = f"ticker: {type(exc).__name__}"
-            log.warning("BTC_TICKER_UNAVAILABLE error=%s", type(exc).__name__)
+            log.warning("SPOT_TICKER_UNAVAILABLE asset=%s error=%s", self.asset, type(exc).__name__)
             return self.current()
         problem = self.validate(price, bid, ask, ts)
         if problem:
             self._error = problem
-            log.warning("BTC_TICK_REJECTED reason=%s", problem)
+            log.warning("SPOT_TICK_REJECTED asset=%s reason=%s", self.asset, problem)
             return self.current()
         assert ts is not None
-        sp = SpotPrice("BTC", price, ts, "coinbase")
+        sp = SpotPrice(self.asset, price, ts, "coinbase")
         self._last, self._bid, self._ask = sp, bid, ask
         self._ticks.append(sp)
         self._failures, self._error = 0, None
@@ -176,14 +178,16 @@ class BTCFeed:
 
     def history(self, asset: str = "BTC") -> list[SpotPrice]:
         """Completed 1-minute closes followed by recent ticks (time-ordered, no duplicates)."""
-        if asset.upper() != "BTC":
+        if asset.upper() != self.asset:
             return []
-        out = bars_to_spot(list(self._bars))
+        out = bars_to_spot(list(self._bars), self.asset)
         last_bar = out[-1].ts if out else None
         out += [t for t in self._ticks if last_bar is None or t.ts > last_bar]
         return out
 
-    def bars(self) -> list[MinuteBar]:
+    def bars(self, asset: str | None = None) -> list[MinuteBar]:
+        if asset is not None and asset.upper() != self.asset:
+            return []
         return list(self._bars)
 
     @property
@@ -193,11 +197,15 @@ class BTCFeed:
     def status(self) -> FeedStatus:
         now = self.clock()
         if self._last is None:
-            return FeedStatus("DOWN", "Coinbase", None, None, self._error or "no data yet")
+            return FeedStatus("DOWN", self._label, None, None, self._error or "no data yet")
         age = (now - self._last.ts).total_seconds()
         if age > self.stale_after_sec:
-            return FeedStatus("STALE" if self._failures < 3 else "DOWN", "Coinbase", self._last.ts, age, self._error)
-        return FeedStatus("CONNECTED", "Coinbase", self._last.ts, age, self._error)
+            return FeedStatus("STALE" if self._failures < 3 else "DOWN", self._label, self._last.ts, age, self._error)
+        return FeedStatus("CONNECTED", self._label, self._last.ts, age, self._error)
+
+    @property
+    def _label(self) -> str:
+        return "Coinbase" if self.asset == "BTC" else f"Coinbase {self.asset}"
 
     async def close(self) -> None:
         await self._http.aclose()
@@ -221,7 +229,9 @@ class FixtureBTCFeed:
         wiggle = self.vol * (math.sin(m * 1.7) + 0.6 * math.sin(m * 0.37) + 0.3 * math.sin(m * 5.3))
         return self.start_price * math.exp(self.drift * (m % 600) + wiggle)
 
-    def bars(self) -> list[MinuteBar]:
+    def bars(self, asset: str | None = None) -> list[MinuteBar]:
+        if asset is not None and asset.upper() != "BTC":
+            return []
         end = self.clock().replace(second=0, microsecond=0)
         out = []
         for i in range(self.minutes, 0, -1):
@@ -250,3 +260,56 @@ class FixtureBTCFeed:
 
     async def close(self) -> None:
         return None
+
+
+class MultiCoinFeed:
+    """One Coinbase feed per coin for the fair-value engine (STRATEGY_MODE=btc with ASSETS=HYPE,DOGE, ...).
+
+    Each coin keeps its own bars, ticks and staleness: nothing is shared between coins.
+    """
+
+    name = "coinbase_exchange"
+
+    def __init__(self, assets: list[str], stale_after_sec: float = 15.0) -> None:
+        self.feeds = {a.upper(): BTCFeed(stale_after_sec, asset=a) for a in assets}
+
+    def _feed(self, asset: str | None) -> BTCFeed | None:
+        if asset is None:
+            return next(iter(self.feeds.values()), None)
+        return self.feeds.get(asset.upper())
+
+    async def get_price(self, asset: str) -> SpotPrice | None:
+        f = self._feed(asset)
+        return await f.get_price(asset) if f else None
+
+    def current(self, asset: str | None = None) -> SpotPrice | None:
+        f = self._feed(asset)
+        return f.current() if f else None
+
+    def history(self, asset: str = "BTC") -> list[SpotPrice]:
+        f = self._feed(asset)
+        return f.history(asset) if f else []
+
+    def bars(self, asset: str | None = None) -> list[MinuteBar]:
+        f = self._feed(asset)
+        return f.bars() if f else []
+
+    @property
+    def spread(self) -> float | None:
+        f = self._feed(None)
+        return f.spread if f else None
+
+    def status(self) -> FeedStatus:
+        """Worst coin's status, so a stale coin is never hidden behind a healthy one."""
+        sts = {a: f.status() for a, f in self.feeds.items()}
+        if not sts:
+            return FeedStatus("DISABLED", "Coinbase", None, None, "no coins configured")
+        worst_a, worst = max(sts.items(), key=lambda kv: (not kv[1].ok, kv[1].age_sec or 1e9))
+        src = "Coinbase " + "/".join(sts)
+        err = worst.error if not worst.ok else None
+        return FeedStatus(worst.state, src, worst.last_ts, worst.age_sec,
+                          f"{worst_a}: {err}" if err else None)
+
+    async def close(self) -> None:
+        for f in self.feeds.values():
+            await f.close()

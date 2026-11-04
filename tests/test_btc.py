@@ -95,7 +95,8 @@ def test_below_contract_maps_yes_to_down() -> None:
     (dict(strike_type="custom"), "unknown strike type"),
     (dict(floor=None), "threshold"),
     (dict(rules=""), "rules text missing"),
-    (dict(asset="ETH"), "not a Bitcoin market"),
+    (dict(asset="ETH"), "does not refer to Ethereum"),
+    (dict(asset="GOLD"), "not a supported single-coin crypto market"),
     (dict(rules=RULES.replace("above", "below")), "BELOW condition"),
     (dict(rules="If the average of Bitcoin prices during the final window is above 60000, Yes."), "averaging window"),
     (dict(rules="If the S&P 500 closes above 6000, Yes."), "does not refer to Bitcoin"),
@@ -367,13 +368,13 @@ def test_risk_manager_btc_mode_approves_and_enforces_account_limits() -> None:
     assert not rejected.approved and rejected.position_size == 0
 
 
-def test_btc_mode_is_bitcoin_only_and_live_needs_manual_confirmation(repo) -> None:
+def test_fair_value_mode_scans_assets_and_live_needs_manual_confirmation(repo) -> None:
     from app.data.btc_feed import FixtureBTCFeed
     from app.kalshi.fixtures import FixtureKalshiClient
     from app.runtime import BotRuntime
 
     s = make_settings(strategy_mode="btc", assets="BTC,ETH,SOL")
-    assert s.asset_list == ["BTC"] and any("Bitcoin only" in w for w in s.validate_runtime())
+    assert s.asset_list == ["BTC", "ETH", "SOL"] and any("paper only" in w for w in s.validate_runtime())
     rt = BotRuntime(s, repo, FixtureKalshiClient(), underlying=FixtureBTCFeed(), profiles=load_profiles(read_env=False))
     rt.store.update(mode="live")
     ok, msg = rt.set_auto_trade(True)
@@ -400,7 +401,7 @@ async def test_end_to_end_paper_trade_from_btc_signal(repo) -> None:
         def history(self, asset: str):
             return []
 
-        def bars(self):
+        def bars(self, asset=None):
             return self._bars
 
         def status(self):

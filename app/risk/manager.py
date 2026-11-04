@@ -117,8 +117,9 @@ class RiskDecision:
 class RiskManager:
     def __init__(self, sizer: PositionSizer, stale_after_sec: float = 30.0, price_buffer_cents: float = 2.0,
                  ev_gate: str = "lower", strategy_mode: str = "quality", kelly_sizing: bool = False,
-                 session: SessionRules | None = None) -> None:
+                 session: SessionRules | None = None, fair_value_pure: bool = False) -> None:
         self.session = session or SessionRules()
+        self.fair_value_pure = fair_value_pure
         self.ev_gate = ev_gate
         # Kelly sizing (opt-in): stake = balance x profile.kelly_fraction x full Kelly, where full Kelly for a
         # binary bought at price c is (p - c) / (1 - c) and p is the CONSERVATIVE win rate measured on this
@@ -172,6 +173,11 @@ class RiskManager:
             fails.append("No directional signal")
         if btc_mode and btc is None:
             fails.append("BTC analysis unavailable")
+        if btc_mode and ctx.mode == "live" and snap.info.asset.upper() != "BTC":
+            # Fair value on other coins is a forward test: real money only after it has proven itself on paper
+            fails.append(f"Fair-value forward test on {snap.info.asset} is paper-only")
+        elif btc_mode and ctx.mode == "live" and self.fair_value_pure:
+            fails.append("FAIR_VALUE_PURE is a paper forward test - never live")
         if not confirm and not btc_mode and signal.confidence < profile.min_confidence:
             fails.append(f"Confidence {signal.confidence} below {lvl} threshold ({profile.min_confidence})")
 
@@ -299,7 +305,9 @@ class RiskManager:
             # every path: a new stake can never exceed what is left of today's loss limit
             kw: dict[str, Any] = {
                 "remaining_daily_loss_usd": profile.max_daily_loss_usd + min(0.0, ctx.daily_realized_pnl)}
-            if btc_mode and btc is not None and btc.edge is not None:
+            if btc_mode and btc is not None and btc.edge is not None and self.fair_value_pure:
+                kw.update(scale=1.0, p_win=btc.edge.p_point)  # same size rule for every trade in the test
+            elif btc_mode and btc is not None and btc.edge is not None:
                 span = max(1, 100 - profile.min_btc_strength)
                 kw.update(scale=0.5 + 0.5 * min(1.0, max(0.0, (btc.strength - profile.min_btc_strength) / span)),
                           p_win=btc.edge.p_low)
@@ -323,7 +331,8 @@ class RiskManager:
             elif btc_mode and btc is not None and btc.edge is not None and btc.approved:
                 # Re-check the edge with the exact (rounded-up) fee for this order size at the worst-case price.
                 n = size.contracts
-                total_ev = n * (btc.edge.p_low * 100 - limit) - estimate_fee(n, limit, self.sizer.fee_rate) * 100
+                p_gate = btc.edge.p_point if self.fair_value_pure else btc.edge.p_low
+                total_ev = n * (p_gate * 100 - limit) - estimate_fee(n, limit, self.sizer.fee_rate) * 100
                 if total_ev < n * profile.min_ev_cents:
                     fails.append(f"Insufficient expected value: {total_ev / n:+.1f}¢/contract after exact fees "
                                  f"at the {limit:.0f}¢ limit for {n} contracts")

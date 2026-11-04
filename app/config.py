@@ -95,6 +95,9 @@ class Settings(BaseSettings):
     max_data_skew_sec: float = Field(20.0, ge=1, le=120)  # max gap between Kalshi and BTC timestamps
     require_settlement_rules: bool = True  # never trade a contract whose rules text is missing
     calibration_ece_tol: float = Field(0.05, gt=0, le=0.3)
+    # Pure fair value: trade exactly the backtested rule (point edge after fees, entry 5-95c, no momentum/regime/
+    # conflict/late-move filters). Used for the HYPE/DOGE paper forward test.
+    fair_value_pure: bool = False
     btc_backtest_report: str = "data/btc_backtest_report.json"  # written by scripts/btc_backtest.py
 
     # --- Signal engine --------------------------------------------------
@@ -110,7 +113,9 @@ class Settings(BaseSettings):
     ev_gate: Literal["lower", "point"] = "lower"
     # "quality" = signal-quality/no-trade/EV gates (default); "confirm" = experimental V4 rule
     # (momentum + trend + order book + underlying all agree). "confirm" is PAPER ONLY.
-    # "btc" (default) = Bitcoin probability model + net-edge + no-trade engine (app/strategy/btc_decision.py)
+    # "btc" (default) = fair-value probability model + net-edge + no-trade engine (app/strategy/btc_decision.py).
+    # It runs on every coin in ASSETS (each with its own Coinbase feed and calibration); non-BTC coins are a
+    # paper-only forward test.
     strategy_mode: Literal["btc", "quality", "confirm"] = "btc"
     observation_retention_days: int = Field(365, ge=7)
     model_refresh_sec: float = Field(600.0, ge=30)
@@ -187,8 +192,6 @@ class Settings(BaseSettings):
 
     @property
     def asset_list(self) -> list[str]:
-        if self.strategy_mode == "btc":
-            return ["BTC"]  # the BTC engine never evaluates other assets
         return [a.strip().upper() for a in self.assets.split(",") if a.strip()]
 
     @property
@@ -254,8 +257,9 @@ class Settings(BaseSettings):
             errors.append("DATA_SOURCE=fixture can never be combined with live trading")
         if self.allow_live_autotrade and not self.live_allowed:
             warnings.append("ALLOW_LIVE_AUTOTRADE ignored because live trading is not enabled")
-        if self.strategy_mode == "btc" and {a.strip().upper() for a in self.assets.split(",") if a.strip()} - {"BTC"}:
-            warnings.append("STRATEGY_MODE=btc trades Bitcoin only; other ASSETS are ignored")
+        if self.strategy_mode == "btc" and set(self.asset_list) - {"BTC"}:
+            warnings.append("STRATEGY_MODE=btc on " + ",".join(a for a in self.asset_list if a != "BTC")
+                            + ": fair-value FORWARD TEST - paper only, never live")
         if not self.asset_list and not self.series_list:
             errors.append("Configure ASSETS and/or SERIES_TICKERS")
         if self.entry_min_left_sec and self.entry_max_left_sec and self.entry_min_left_sec >= self.entry_max_left_sec:
