@@ -134,6 +134,7 @@ class BotRuntime:
         self.gold_provider: Any = None  # PythGoldProvider when GOLD_ENABLED + GOLD_PYTH_FEED_ID (research only)
         self.gold: GoldStatus | None = None
         self.model = self._build_model()
+        self.forward_test = self._mark_forward_test()
         self._model_built = time.time()
         self.adaptive = AdaptiveState("NORMAL")
         self._obs_keys: set[tuple[str, int]] = set()
@@ -479,6 +480,28 @@ class BotRuntime:
             max_entry_cents=95.0 if s.fair_value_pure else p.max_entry_price_cents,
             pure=s.fair_value_pure,
         )
+
+    def forward_test_signature(self) -> str | None:
+        """Identifies one forward-test configuration; None when no fair-value forward test is configured."""
+        s = self.settings
+        if s.strategy_mode != "btc" or not (s.fair_value_pure or set(s.asset_list) - {"BTC"}):
+            return None
+        return (f"assets={','.join(s.asset_list)} pure={s.fair_value_pure} edge>={s.min_edge_cents:g} "
+                f"entry={s.entry_min_left_sec:g}-{s.entry_max_left_sec:g}s left "
+                f"skip_after_loss={s.skip_windows_after_loss} max_per_day={s.max_trades_per_day}")
+
+    def _mark_forward_test(self) -> dict[str, Any] | None:
+        """Remember when the current forward-test configuration started; a changed configuration starts a new test
+        (scripts/forward_report.py only counts trades opened since then)."""
+        sig = self.forward_test_signature()
+        if sig is None:
+            return None
+        cur = self.repo.get_setting("forward_test")
+        if not isinstance(cur, dict) or cur.get("config") != sig:
+            cur = {"config": sig, "start": utcnow().isoformat()}
+            self.repo.set_setting("forward_test", cur)
+            log.info("FORWARD_TEST_START %s", sig)
+        return cur
 
     def calibration_for(self, asset: str) -> CalibrationReport | None:
         return self.calibrations.get(asset.upper())

@@ -39,6 +39,10 @@ def boot(xs: list[float], n: int = 4000) -> tuple[float, float] | None:
     return ms[int(0.025 * n)], ms[int(0.975 * n) - 1]
 
 
+def _aware(dt: datetime) -> datetime:
+    return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+
+
 def verdict(days: float, per_market: list[float]) -> str:
     n = len(per_market)
     avg = sum(per_market) / n if n else 0.0
@@ -62,17 +66,31 @@ def verdict(days: float, per_market: list[float]) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--assets", default="HYPE,DOGE")
-    ap.add_argument("--since", help="YYYY-MM-DD (default: first paper trade in the database)")
+    ap.add_argument("--since", help="YYYY-MM-DD[THH:MM] UTC (default: when the bot started this test configuration)")
     a = ap.parse_args()
     assets = [x.strip().upper() for x in a.assets.split(",") if x.strip()]
-    since = datetime.fromisoformat(a.since).replace(tzinfo=UTC) if a.since else None
     repo = Repository(Database(Settings().database_url))
+    marker = repo.get_setting("forward_test")
+    if a.since:
+        since: datetime | None = datetime.fromisoformat(a.since)
+    elif isinstance(marker, dict) and marker.get("start"):
+        since = datetime.fromisoformat(marker["start"])  # set by the bot when this test configuration started
+        print(f"Test configuration: {marker.get('config')}")
+    else:
+        since = None
+        print("⚠️ No forward-test start recorded (bot not in STRATEGY_MODE=btc with FAIR_VALUE_PURE/HYPE/DOGE yet?)"
+              " - counting every paper trade")
+    if since is not None and since.tzinfo is None:
+        since = since.replace(tzinfo=UTC)
+    # only trades OPENED after the start (a trade from the old strategy that closed later is not counted)
     rows = [p for p in repo.closed_positions(mode="paper", since=since, limit=1_000_000)
-            if p.asset.upper() in assets and p.realized_pnl is not None]
+            if p.asset.upper() in assets and p.realized_pnl is not None
+            and (since is None or _aware(p.opened_at) >= since)]
     if not rows:
-        print("No closed paper trades yet for " + ",".join(assets) + ". Let the bot run; check again in a few days.")
+        print("No closed forward-test paper trades yet for " + ",".join(assets)
+              + ". Let the bot run; check again in a few days.")
         return 0
-    start = since or min(p.opened_at for p in rows)
+    start = since or min(_aware(p.opened_at) for p in rows)
     days = (datetime.now(UTC) - start).total_seconds() / 86400
     print(f"FORWARD TEST (paper) since {start:%Y-%m-%d} · {days:.1f} days · rules: PASS needs {MIN_DAYS}+ days, "
           f"{MIN_MARKETS}+ markets, 95% range above 0\n")

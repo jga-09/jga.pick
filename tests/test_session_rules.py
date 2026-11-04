@@ -155,3 +155,21 @@ def test_calibration_is_per_coin(repo):
     rt = BotRuntime(make_settings(strategy_mode="btc", assets="HYPE,DOGE"), repo, FixtureKalshiClient(),
                     underlying=FixtureBTCFeed(), profiles=load_profiles(read_env=False))
     assert set(rt.calibrations) == {"HYPE", "DOGE"} and rt.calibration_for("BTC") is None
+
+
+def test_forward_test_start_is_recorded_and_reset_on_config_change(repo):
+    from app.data.btc_feed import FixtureBTCFeed
+    from app.kalshi.fixtures import FixtureKalshiClient
+    from app.risk.profiles import load_profiles
+    from app.runtime import BotRuntime
+    from tests.conftest import make_settings
+
+    def rt(**kw):
+        return BotRuntime(make_settings(strategy_mode="btc", assets="HYPE,DOGE", **kw), repo, FixtureKalshiClient(),
+                          underlying=FixtureBTCFeed(), profiles=load_profiles(read_env=False))
+
+    first = rt(fair_value_pure=True).forward_test
+    assert first and "HYPE,DOGE" in first["config"]
+    assert rt(fair_value_pure=True).forward_test == first  # restart keeps the same test
+    changed = rt(fair_value_pure=True, min_edge_cents=6).forward_test
+    assert changed["config"] != first["config"] and changed["start"] >= first["start"]
