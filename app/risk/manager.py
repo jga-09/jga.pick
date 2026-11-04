@@ -85,8 +85,12 @@ class RiskDecision:
 
 class RiskManager:
     def __init__(self, sizer: PositionSizer, stale_after_sec: float = 30.0, price_buffer_cents: float = 2.0,
-                 ev_gate: str = "lower", strategy_mode: str = "quality") -> None:
+                 ev_gate: str = "lower", strategy_mode: str = "quality", kelly_sizing: bool = False) -> None:
         self.ev_gate = ev_gate
+        # Kelly sizing (opt-in): stake = balance x profile.kelly_fraction x full Kelly, where full Kelly for a
+        # binary bought at price c is (p - c) / (1 - c) and p is the CONSERVATIVE win rate measured on this
+        # asset's own history. No measured edge -> Kelly = 0 -> no trade. Hard dollar limits still apply.
+        self.kelly_sizing = kelly_sizing
         self.strategy_mode = strategy_mode  # "quality" (default) | "confirm" (experimental, paper only)
         self.sizer = sizer
         self.stale_after_sec = stale_after_sec
@@ -264,6 +268,12 @@ class RiskManager:
                 span = max(1, 100 - profile.min_btc_strength)
                 kw.update(scale=0.5 + 0.5 * min(1.0, max(0.0, (btc.strength - profile.min_btc_strength) / span)),
                           p_win=btc.edge.p_low)
+            elif self.kelly_sizing:
+                p_low = kelly_win_rate(estimate)
+                if p_low is None:
+                    fails.append("Kelly sizing: no measured edge for this setup yet (Kelly says bet 0%)")
+                else:
+                    kw.update(scale=1.0, p_win=p_low)
             size = self.sizer.size(
                 profile,
                 price_cents=limit,  # size at the worst-case limit price
@@ -303,6 +313,15 @@ class RiskManager:
         log_event(log, "RISK_EVAL", logging.DEBUG, ticker=snap.ticker, profile=lvl, approved=approved,
                   reason=decision.reason)
         return decision
+
+
+def kelly_win_rate(estimate: Any) -> float | None:
+    """Conservative win rate for Kelly: the historical estimate's lower bound (asset-specific, enough markets)."""
+    if estimate is None or not getattr(estimate, "sufficient", False) or estimate.p_model is None:
+        return None
+    if estimate.ev_cents is None or estimate.ev_low_cents is None:
+        return None
+    return max(0.0, estimate.p_model - (estimate.ev_cents - estimate.ev_low_cents) / 100)
 
 
 def _checklist(sig: SignalResult, snap: MarketSnapshot, p: RiskProfile, a: Any, est: Any, ev_ok: bool,

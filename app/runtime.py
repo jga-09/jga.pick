@@ -147,7 +147,7 @@ class BotRuntime:
         self._early_exits: dict[str, list[Position]] = {}  # ticker -> positions cashed out early (to score later)
         self.risk = RiskManager(PositionSizer(settings.fee_rate), settings.stale_data_sec,
                                 settings.order_price_tolerance_cents, ev_gate=settings.ev_gate,
-                                strategy_mode=settings.strategy_mode)
+                                strategy_mode=settings.strategy_mode, kelly_sizing=settings.kelly_sizing)
         self.portfolio = Portfolio(repo, settings.paper_starting_balance)
         self.paper = PaperExecutor(self.portfolio, settings.paper_slippage_cents, settings.fee_rate)
         # The live executor is only constructed when configuration permits live trading.

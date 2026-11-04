@@ -133,6 +133,10 @@ class Settings(BaseSettings):
     early_exit_stop_loss_pct: float = Field(0.0, ge=0, le=95)  # 0 = off; e.g. 50 = sell if value halves
     # Take-profit (0 = off). Paper sells automatically; live only gets a Sell button. Each one is scored against
     # simply holding to settlement, so you can see whether it helps (selling early pays the spread + a 2nd fee).
+    # Kelly bet sizing (off = fixed dollar ranges per risk level). On: stake = balance x KELLY_FRACTION-of-profile x
+    # Kelly, using the price you pay (not 1:1) and a conservative win rate measured on that coin's own settled
+    # history. With no proven edge Kelly is 0, so the bot does not trade. Profile dollar caps always still apply.
+    kelly_sizing: bool = False
     take_profit_cents: float = Field(0.0, ge=0, le=99)  # sell when the bid is this many cents above entry
     take_profit_price_cents: float = Field(0.0, ge=0, le=99)  # sell when the bid reaches this price
     # Daily recap: one Telegram message after each UTC day closes (trades, P&L after fees, fees, best/worst)

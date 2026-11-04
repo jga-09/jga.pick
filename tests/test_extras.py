@@ -88,3 +88,33 @@ def test_only_single_coin_crypto_can_ever_be_traded(runtime):
         dec = runtime.check_risk(sig, runtime.market_data.latest[info.ticker])
         blocked = any("research-only" in f for f in dec.failures)
         assert blocked is (not ok), asset
+
+
+def test_kelly_math_and_calculator():
+    import importlib.util
+    import sys as _sys
+
+    spec = importlib.util.spec_from_file_location("kelly_script", "scripts/kelly.py")
+    k = importlib.util.module_from_spec(spec)
+    _sys.modules["kelly_script"] = k
+    spec.loader.exec_module(k)
+    assert k.kelly(0.60, 50, fee_rate=0) == pytest.approx(0.20)  # the 1:1 rule of thumb: p - q
+    assert k.kelly(0.60, 62) == 0.0  # 60% at 62c is not an edge
+    assert 0 < k.kelly(0.80, 75) < k.kelly(0.80, 70)
+
+
+def test_kelly_sizing_needs_measured_edge(runtime):
+    from types import SimpleNamespace
+
+    from app.risk.manager import kelly_win_rate
+
+    assert kelly_win_rate(None) is None
+    assert kelly_win_rate(SimpleNamespace(sufficient=False, p_model=0.8, ev_cents=5, ev_low_cents=1)) is None
+    est = SimpleNamespace(sufficient=True, p_model=0.80, ev_cents=5.0, ev_low_cents=1.0)
+    assert kelly_win_rate(est) == pytest.approx(0.76)  # uses the conservative bound
+    runtime.risk.kelly_sizing = True
+    runtime.store.update(running=True, risk_level=RiskLevel.HIGH)
+    info = make_info()
+    sig = feed_history(runtime, info, "up")
+    dec = runtime.check_risk(sig, runtime.market_data.latest[info.ticker])
+    assert not dec.approved and any("Kelly" in f for f in dec.failures)  # no history -> Kelly 0 -> no trade
