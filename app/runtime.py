@@ -40,7 +40,7 @@ from app.research.tradeanalysis import (
     entry_snapshot,
     exit_snapshot,
 )
-from app.risk.manager import RiskDecision, RiskManager
+from app.risk.manager import RiskDecision, RiskManager, SessionRules
 from app.risk.profiles import RiskLevel, RiskProfile, load_profiles
 from app.risk.sizing import PositionSizer
 from app.state import BotState, StateStore
@@ -147,7 +147,13 @@ class BotRuntime:
         self._early_exits: dict[str, list[Position]] = {}  # ticker -> positions cashed out early (to score later)
         self.risk = RiskManager(PositionSizer(settings.fee_rate), settings.stale_data_sec,
                                 settings.order_price_tolerance_cents, ev_gate=settings.ev_gate,
-                                strategy_mode=settings.strategy_mode, kelly_sizing=settings.kelly_sizing)
+                                strategy_mode=settings.strategy_mode, kelly_sizing=settings.kelly_sizing,
+                                session=SessionRules(
+                                    entry_min_left_sec=settings.entry_min_left_sec,
+                                    entry_max_left_sec=settings.entry_max_left_sec,
+                                    sit_out_after_loss_sec=settings.skip_windows_after_loss
+                                    * settings.market_duration_minutes * 60,
+                                    max_trades_per_day=settings.max_trades_per_day))
         self.portfolio = Portfolio(repo, settings.paper_starting_balance)
         self.paper = PaperExecutor(self.portfolio, settings.paper_slippage_cents, settings.fee_rate)
         # The live executor is only constructed when configuration permits live trading.
@@ -175,7 +181,10 @@ class BotRuntime:
 
     def profile(self, level: RiskLevel | None = None) -> RiskProfile:
         level = level or self.state.risk_level
-        return self.base_profiles[level].with_overrides(self.state.risk_overrides.get(level.value, {}))
+        p = self.base_profiles[level].with_overrides(self.state.risk_overrides.get(level.value, {}))
+        if self.settings.min_edge_cents > p.min_ev_cents:  # MIN_EDGE_CENTS: a floor no profile can go under
+            p = p.with_overrides({"min_ev_cents": self.settings.min_edge_cents})
+        return p
 
     def mode_permitted(self, mode: str | None = None) -> bool:
         mode = mode or self.state.mode
@@ -459,7 +468,8 @@ class BotRuntime:
         return BTCParams(
             min_ev_cents=p.min_ev_cents, min_strength=p.min_btc_strength, max_prob_width=p.max_prob_width,
             max_spread_cents=p.max_spread_cents, min_liquidity=p.min_liquidity_contracts,
-            min_time_sec=p.min_time_remaining_sec, blocked_regimes=p.regimes_blocked,
+            min_time_sec=max(p.min_time_remaining_sec, s.entry_min_left_sec), max_time_sec=s.entry_max_left_sec,
+            blocked_regimes=p.regimes_blocked,
             max_late_move_cents=p.max_late_move_cents, require_calibration=p.require_known_ev,
             fee_rate=s.fee_rate, slippage_cents=s.paper_slippage_cents, kalshi_stale_sec=s.stale_data_sec,
             btc_stale_sec=s.btc_feed_stale_sec, max_skew_sec=s.max_data_skew_sec,

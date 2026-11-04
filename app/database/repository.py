@@ -187,6 +187,13 @@ class Repository:
             q = q.order_by(PositionRow.closed_at.desc()).limit(limit).offset(offset)
             return [self._to_position(r) for r in s.scalars(q)]
 
+    def markets_entered_since(self, mode: str, since: datetime) -> int:
+        """Distinct markets with a position opened at/after ``since`` (partial exits do not double count)."""
+        with self.db.session() as s:
+            q = select(func.count(func.distinct(PositionRow.ticker))).where(
+                PositionRow.mode == mode, PositionRow.opened_at >= since)
+            return int(s.scalar(q) or 0)
+
     def count_closed(self, mode: str | None = None) -> int:
         with self.db.session() as s:
             q = select(func.count(PositionRow.id)).where(PositionRow.status == "closed")

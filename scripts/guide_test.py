@@ -1,0 +1,206 @@
+"""Test the "15-minute strategy guide" approaches on real Kalshi history (data/replay_cache).
+
+    python scripts/guide_test.py                         # BTC, ETH, SOL, XRP, DOGE, HYPE
+    python scripts/guide_test.py --assets BTC --slippage 2
+
+Approaches (rules fixed BEFORE looking at results; one trade per market, paying the ask + Kalshi's rounded-up
+taker fee + slippage, held to settlement):
+
+  A  Fair value / distance-to-target: P(finish >= strike) from the spot price's distance to the strike, the time
+     left (minus the 60-second settlement average) and the last 60 minutes' realized volatility. Buy the first side
+     whose edge after fees >= EDGE cents.  Variants: any time (1.5-14 min left) vs MID-WINDOW only (5-11 min left
+     = minutes 4-10), EDGE 3c vs 6c.
+  B  Late-window favourite: with 5 min left, buy the side priced 60-80c when spot is on that side of the strike
+     AND the last 5 minutes moved that way.
+  D  Mean reversion of extremes: 5-10 min left, the last 5 minutes moved > 2 sigma and pushed a side to <= 15c ->
+     buy that cheap side.
+  (C, final-minute locked average, needs second-by-second data and speed - not testable on 1-minute candles.)
+
+Each line shows trades, win rate, average P&L per trade (cents, after fees) with a 95% bootstrap range, on the
+earlier days AND on the untouched last 7 days. A rule only counts if BOTH are positive and the ranges stay above 0.
+Spot = Coinbase 1-minute closes (Kalshi settles on CF Benchmarks, so expect small differences). Read-only.
+"""
+
+from __future__ import annotations
+
+import argparse
+import math
+import random
+import sys
+from bisect import bisect_right
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from statistics import NormalDist
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from app.research.model_data import load_crypto_bars, load_markets
+from app.trading.fees import estimate_fee
+
+ROOT = Path(__file__).resolve().parents[1]
+ND = NormalDist()
+AVG_WINDOW = 60  # Kalshi settles on a 60-second average
+
+
+def fee_c(price: float) -> float:
+    return estimate_fee(1, price, 0.07) * 100
+
+
+def boot(xs: list[float], n: int = 2000) -> tuple[float, float] | None:
+    if len(xs) < 10:
+        return None
+    rng = random.Random(7)
+    ms = sorted(sum(rng.choices(xs, k=len(xs))) / len(xs) for _ in range(n))
+    return ms[int(0.025 * n)], ms[int(0.975 * n) - 1]
+
+
+class Spot:
+    """Coinbase 1-minute closes with O(1) 60-minute realized volatility."""
+
+    def __init__(self, bars: list) -> None:
+        self.ends = [b.end for b in bars]
+        self.close = [b.close for b in bars]
+        r2 = [0.0]
+        for i in range(1, len(bars)):
+            a, b = self.close[i - 1], self.close[i]
+            r = math.log(b / a) if a > 0 and b > 0 else 0.0
+            r2.append(r2[-1] + r * r)
+        self.r2 = r2
+
+    def at(self, t: datetime) -> int | None:
+        i = bisect_right(self.ends, t.timestamp()) - 1
+        return i if i >= 60 and t.timestamp() - self.ends[i] <= 120 else None
+
+    def sigma_per_sec(self, i: int) -> float:
+        return math.sqrt((self.r2[i] - self.r2[i - 60]) / 60) / math.sqrt(60)
+
+    def ret(self, i: int, n: int) -> float:
+        return math.log(self.close[i] / self.close[i - n])
+
+
+def p_yes(spot: float, strike: float, sigma: float, t_left: float) -> float | None:
+    if t_left < AVG_WINDOW or sigma <= 0 or spot <= 0 or strike <= 0:
+        return None
+    h = (t_left - AVG_WINDOW) + AVG_WINDOW / 3
+    return min(0.999, max(0.001, ND.cdf(math.log(spot / strike) / (sigma * math.sqrt(h)))))
+
+
+def quotes(m: dict) -> dict[datetime, tuple[float, float]]:
+    out = {}
+    for c in m["candles"]:
+        if c[1] is not None and c[2] is not None and 0 < c[1] < c[2] < 100 and c[2] - c[1] <= 5:
+            out[c[0]] = (c[1], c[2])
+    return out
+
+
+def pnl(side: str, yes_won: bool, price: float, slip: float) -> float:
+    won = yes_won if side == "yes" else not yes_won
+    return (100 if won else 0) - price - fee_c(price) - slip
+
+
+def rule_a(m, q, sp, lo_min, hi_min, edge, slip):
+    for k in range(hi_min, lo_min - 1, -1):  # earliest allowed minute first
+        at = m["close"] - timedelta(minutes=k)
+        if at not in q or (i := sp.at(at)) is None:
+            continue
+        p = p_yes(sp.close[i], float(m["strike"]), sp.sigma_per_sec(i), k * 60)
+        if p is None:
+            continue
+        bid, ask = q[at]
+        for side, price, pw in (("yes", ask, p), ("no", 100 - bid, 1 - p)):
+            if 5 <= price <= 95 and pw * 100 - price - fee_c(price) - slip >= edge:
+                return side, price
+    return None
+
+
+def rule_b(m, q, sp, slip):
+    at = m["close"] - timedelta(minutes=5)
+    if at not in q or (i := sp.at(at)) is None:
+        return None
+    bid, ask = q[at]
+    up = sp.close[i] >= float(m["strike"]) and sp.ret(i, 5) > 0
+    down = sp.close[i] < float(m["strike"]) and sp.ret(i, 5) < 0
+    if up and 60 <= ask <= 80:
+        return "yes", ask
+    if down and 60 <= 100 - bid <= 80:
+        return "no", 100 - bid
+    return None
+
+
+def rule_d(m, q, sp, slip):
+    for k in range(10, 4, -1):
+        at = m["close"] - timedelta(minutes=k)
+        if at not in q or (i := sp.at(at)) is None:
+            continue
+        z = sp.ret(i, 5) / (sp.sigma_per_sec(i) * math.sqrt(300) or 1e-9)
+        bid, ask = q[at]
+        if z > 2 and 100 - bid <= 15 and 100 - bid >= 3:  # big up move, NO is cheap -> buy NO
+            return "no", 100 - bid
+        if z < -2 and 3 <= ask <= 15:
+            return "yes", ask
+    return None
+
+
+def run(asset: str, cache: Path, slip: float, holdout_days: int, totals: dict) -> None:
+    bars = load_crypto_bars(cache, asset)
+    markets = [m for m in load_markets(cache, f"KX{asset}15M-") if m["result"] in ("yes", "no") and m["strike"]]
+    if not bars or not markets:
+        print(f"\n{asset}: no data (run: python scripts/replay.py --days 30 --no-trades --assets {asset})")
+        return
+    sp = Spot(bars)
+    hold_from = max(m["close"] for m in markets) - timedelta(days=holdout_days)
+    rules = {
+        "A fair value, any time, edge>=3c": lambda m, q: rule_a(m, q, sp, 2, 14, 3, slip),
+        "A fair value, any time, edge>=6c": lambda m, q: rule_a(m, q, sp, 2, 14, 6, slip),
+        "A fair value, MID-window, edge>=3c": lambda m, q: rule_a(m, q, sp, 5, 11, 3, slip),
+        "A fair value, MID-window, edge>=6c": lambda m, q: rule_a(m, q, sp, 5, 11, 6, slip),
+        "B late favourite 60-80c @5min": lambda m, q: rule_b(m, q, sp, slip),
+        "D mean reversion (cheap side)": lambda m, q: rule_d(m, q, sp, slip),
+    }
+    print(f"\n=== {asset} · {len(markets)} settled markets · slippage {slip:g}c ===")
+    for name, rule in rules.items():
+        dev, hold = [], []
+        for m in markets:
+            q = quotes(m)
+            pick = rule(m, q)
+            if pick is None:
+                continue
+            side, price = pick
+            r = pnl(side, m["result"] == "yes", price, slip)
+            (hold if m["close"] >= hold_from else dev).append((r, r > 0))
+            totals.setdefault(name, ([], []))[0 if m["close"] < hold_from else 1].append(r)
+        print(f"  {name}")
+        for label, xs in (("earlier", dev), ("last 7d", hold)):
+            print("    " + line(label, [x[0] for x in xs]))
+
+
+def line(label: str, ps: list[float]) -> str:
+    if not ps:
+        return f"{label:<8} 0 trades"
+    ci = boot(ps)
+    rng = f" ({ci[0]:+.1f}..{ci[1]:+.1f}c)" if ci else ""
+    wr = sum(p > 0 for p in ps) / len(ps)
+    return f"{label:<8} {len(ps):5} trades  win {wr:5.1%}  avg {sum(ps) / len(ps):+5.1f}c/trade{rng}"
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--assets", default="BTC,ETH,SOL,XRP,DOGE,HYPE")
+    ap.add_argument("--cache", default=str(ROOT / "data" / "replay_cache"))
+    ap.add_argument("--slippage", type=float, default=1.0)
+    ap.add_argument("--holdout-days", type=int, default=7)
+    a = ap.parse_args()
+    totals: dict[str, tuple[list[float], list[float]]] = {}
+    for asset in [x.strip().upper() for x in a.assets.split(",") if x.strip()]:
+        run(asset, Path(a.cache), a.slippage, a.holdout_days, totals)
+    if totals:
+        print("\n=== ALL COINS ===")
+        for name, (dev, hold) in totals.items():
+            print(f"  {name}\n    {line('earlier', dev)}\n    {line('last 7d', hold)}")
+    print("\nA rule is worth paper-testing in the bot only if 'earlier' AND 'last 7d' are both positive with ranges\n"
+          f"above zero. (generated {datetime.now(UTC):%Y-%m-%d %H:%M} UTC · research only, nothing traded)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

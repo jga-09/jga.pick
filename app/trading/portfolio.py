@@ -139,6 +139,8 @@ class Portfolio:
             last_loss_at=self.last_loss_at or self._last_loss_from_history(mode),
             last_trade_at=dict(self.last_trade_at),
             consecutive_losses=self.consecutive_losses(mode),
+            markets_today=self.repo.markets_entered_since(mode, utcnow().replace(hour=0, minute=0, second=0,
+                                                                                  microsecond=0)),
         )
 
     def _last_loss_from_history(self, mode: str) -> datetime | None:

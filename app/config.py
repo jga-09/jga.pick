@@ -141,6 +141,12 @@ class Settings(BaseSettings):
     take_profit_price_cents: float = Field(0.0, ge=0, le=99)  # sell when the bid reaches this price
     # Daily recap: one Telegram message after each UTC day closes (trades, P&L after fees, fees, best/worst)
     daily_recap: bool = True
+    # --- Session discipline (all strategies; 0 = off). Recommended "guide" values in .env.example ---------
+    entry_min_left_sec: float = Field(0.0, ge=0, le=3600)  # never ENTER with less time left than this
+    entry_max_left_sec: float = Field(0.0, ge=0, le=3600)  # never ENTER with more time left (mid-window only)
+    min_edge_cents: float = Field(0.0, ge=0, le=50)  # floor on the required net edge after fees + slippage
+    skip_windows_after_loss: int = Field(0, ge=0, le=8)  # sit out this many 15-min windows after a loss
+    max_trades_per_day: int = Field(0, ge=0, le=500)  # max markets entered per UTC day
     # Send a P&L image after every finished trade and when the bot is stopped.
     pnl_image: bool = True
     strong_signal_alert_min_confidence: int = Field(80, ge=0, le=100)
@@ -252,6 +258,8 @@ class Settings(BaseSettings):
             warnings.append("STRATEGY_MODE=btc trades Bitcoin only; other ASSETS are ignored")
         if not self.asset_list and not self.series_list:
             errors.append("Configure ASSETS and/or SERIES_TICKERS")
+        if self.entry_min_left_sec and self.entry_max_left_sec and self.entry_min_left_sec >= self.entry_max_left_sec:
+            errors.append("ENTRY_MIN_LEFT_SEC must be smaller than ENTRY_MAX_LEFT_SEC (no entry time would be left)")
         if errors:
             raise ConfigError("; ".join(errors))
         return warnings

@@ -341,6 +341,23 @@ separate, fees, profit factor, drawdown, streaks, calibration), **🧪 Backtest*
 text (a 60-second average is assumed and reported). All thresholds are a-priori defaults. Change them only
 when out-of-sample backtests and paper results support it.
 
+## 15c-2. Strategy-guide rules (entry timing + session discipline)
+
+The bot's `STRATEGY_MODE=btc` engine is already the guide's approach A (fair value / distance to target: spot vs
+strike, time left minus the 60-second settlement average, realized volatility, edge after the rounded-up fee).
+These settings add the guide's discipline to **every** strategy; all are off (0) unless set:
+
+| Setting | Guide value | Effect |
+|---|---|---|
+| `ENTRY_MAX_LEFT_SEC` / `ENTRY_MIN_LEFT_SEC` | 660 / 300 | enter only in minutes 4-10 of the window |
+| `MIN_EDGE_CENTS` | 3 | required net edge after fees + slippage, floor over the risk profile |
+| `SKIP_WINDOWS_AFTER_LOSS` | 1 | sit out the next window after any loss |
+| `MAX_TRADES_PER_DAY` | 10 | max markets entered per UTC day |
+
+Exits ("when in doubt, cash out") are the existing `EARLY_EXIT`, `TAKE_PROFIT_*` and stop-loss settings.
+Test the guide's approaches A, B and D on your downloaded history before relying on them:
+`python scripts/guide_test.py` (earlier days vs the untouched last 7 days, after fees). Paper only.
+
 ## 15d. Advanced upgrade: per-asset models, Gold research, live-order safety
 
 See `docs/AUDIT.md` for everything found and fixed. In short:

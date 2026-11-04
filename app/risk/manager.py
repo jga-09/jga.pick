@@ -45,6 +45,37 @@ class RiskContext:
     adaptive_mode: str = "NORMAL"  # NORMAL | CAUTION | PAUSED
     adaptive_reason: str = ""
     consecutive_losses: int = 0  # most recent closed trades in this mode that lost, in a row
+    markets_today: int = 0  # distinct markets entered today (UTC) in this mode, open or closed
+
+
+@dataclass(frozen=True)
+class SessionRules:
+    """Entry timing + session discipline shared by every strategy (each value 0 = off)."""
+
+    entry_min_left_sec: float = 0.0
+    entry_max_left_sec: float = 0.0
+    sit_out_after_loss_sec: float = 0.0
+    max_trades_per_day: int = 0
+
+    def failures(self, remaining_sec: float, ctx: RiskContext, now: datetime) -> list[str]:
+        out: list[str] = []
+        if self.entry_max_left_sec and remaining_sec > self.entry_max_left_sec:
+            out.append(f"Too early in the window ({int(remaining_sec // 60)}:{int(remaining_sec % 60):02d} left; "
+                       f"entries only with {_mmss(self.entry_max_left_sec)} or less)")
+        if self.entry_min_left_sec and 0 < remaining_sec < self.entry_min_left_sec:
+            out.append(f"Too late in the window ({int(remaining_sec)}s left < {int(self.entry_min_left_sec)}s)")
+        if self.sit_out_after_loss_sec and ctx.last_loss_at is not None:
+            left = self.sit_out_after_loss_sec - (now - ctx.last_loss_at).total_seconds()
+            if left > 0:
+                out.append(f"Sitting out after a loss ({_mmss(left)} left)")
+        if self.max_trades_per_day and ctx.markets_today >= self.max_trades_per_day:
+            out.append(f"Daily trade limit reached ({ctx.markets_today}/{self.max_trades_per_day} today)")
+        return out
+
+
+def _mmss(sec: float) -> str:
+    sec = max(0, int(sec))
+    return f"{sec // 60}:{sec % 60:02d}"
 
 
 @dataclass(frozen=True)
@@ -85,7 +116,9 @@ class RiskDecision:
 
 class RiskManager:
     def __init__(self, sizer: PositionSizer, stale_after_sec: float = 30.0, price_buffer_cents: float = 2.0,
-                 ev_gate: str = "lower", strategy_mode: str = "quality", kelly_sizing: bool = False) -> None:
+                 ev_gate: str = "lower", strategy_mode: str = "quality", kelly_sizing: bool = False,
+                 session: SessionRules | None = None) -> None:
+        self.session = session or SessionRules()
         self.ev_gate = ev_gate
         # Kelly sizing (opt-in): stake = balance x profile.kelly_fraction x full Kelly, where full Kelly for a
         # binary bought at price c is (p - c) / (1 - c) and p is the CONSERVATIVE win rate measured on this
@@ -149,6 +182,8 @@ class RiskManager:
             fails.append("Market closed")
         elif remaining < profile.min_time_remaining_sec and not btc_mode:
             fails.append(f"Too close to expiry ({int(remaining)}s < {profile.min_time_remaining_sec}s)")
+        if remaining > 0:
+            fails.extend(self.session.failures(remaining, ctx, now))
         age = snap.age_sec(now)
         if age > self.stale_after_sec:
             fails.append(f"Stale market data ({int(age)}s old)")

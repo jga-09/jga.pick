@@ -33,6 +33,7 @@ class NoTrade(StrEnum):
     STALE_DATA = "Market data is stale"
     SETTLEMENT_UNVERIFIED = "Market settlement conditions not verified"
     INSUFFICIENT_TIME = "Insufficient time remaining"
+    TOO_EARLY = "Too early in the window"
     DAILY_LOSS = "Daily loss limit reached"
     POSITION_LIMIT = "Position limit reached"
     EXCESSIVE_SPREAD = "Excessive spread"
@@ -101,6 +102,7 @@ class BTCParams:
     kalshi_stale_sec: float = 30.0
     btc_stale_sec: float = 15.0
     max_skew_sec: float = 20.0
+    max_time_sec: float = 0.0  # 0 = off; else only enter with at most this much time left (mid-window entries)
     min_entry_cents: float = 5.0
     max_entry_cents: float = 95.0
     conflict_kalshi_cents: float = 5.0
@@ -282,6 +284,9 @@ def decide(inp: BTCInputs, prm: BTCParams) -> BTCSignal:
     min_t = max(prm.min_time_sec, terms.averaging_window_sec + 30)
     if inp.t_left_sec < min_t:
         no(NoTrade.INSUFFICIENT_TIME, f"{inp.t_left_sec:.0f}s left < {min_t:.0f}s")
+    if prm.max_time_sec and inp.t_left_sec > prm.max_time_sec:
+        no(NoTrade.TOO_EARLY, f"{inp.t_left_sec / 60:.1f} min left; entries only with "
+                              f"{prm.max_time_sec / 60:.1f} min or less")
 
     # ---- edge ---------------------------------------------------------------
     edges = side_edges(inp, prm) if est.ok else []
