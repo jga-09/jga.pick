@@ -144,6 +144,8 @@ def main() -> None:
     s = Settings()
     s = s.model_copy(update={"kalshi_read_rps": max(1.0, min(args.rps, 20.0))})
     assets = [a.strip().upper() for a in (args.assets or ",".join(s.asset_list)).split(",") if a.strip()]
+    # discover series for exactly the coins asked for (not the bot's ASSETS / BTC-only engine setting)
+    s = s.model_copy(update={"assets": ",".join(assets), "strategy_mode": "quality"})
     repo = Repository(Database(f"sqlite:///{Path(args.db).resolve()}"))
     repo.init()
     if not args.report_only:
