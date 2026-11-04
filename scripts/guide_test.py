@@ -2,6 +2,7 @@
 
     python scripts/guide_test.py                         # BTC, ETH, SOL, XRP, DOGE, HYPE
     python scripts/guide_test.py --assets BTC --slippage 2
+    python scripts/guide_test.py --assets HYPE,DOGE --before 2026-10-05   # fresh test on OLDER, unseen markets
 
 Approaches (rules fixed BEFORE looking at results; one trade per market, paying the ask + Kalshi's rounded-up
 taker fee + slippage, held to settlement):
@@ -110,11 +111,18 @@ def rule_a(m, q, sp, lo_min, hi_min, edge, slip):
     return None
 
 
-def run(asset: str, cache: Path, slip: float, holdout_days: int, totals: dict) -> None:
+CHOSEN = "A fair value, MID-window, edge>=6c"  # the rule the bot forward-tests (FAIR_VALUE_PURE)
+
+
+def run(asset: str, cache: Path, slip: float, holdout_days: int, totals: dict, before: datetime | None = None,
+        chosen: dict | None = None) -> None:
     bars = load_crypto_bars(cache, asset)
     markets = [m for m in load_markets(cache, f"KX{asset}15M-") if m["result"] in ("yes", "no") and m["strike"]]
+    if before is not None:
+        markets = [m for m in markets if m["close"] < before]  # only markets the rule was NOT chosen on
     if not bars or not markets:
-        print(f"\n{asset}: no data (run: python scripts/replay.py --days 30 --no-trades --assets {asset})")
+        hint = "--days 120" if before else "--days 30"
+        print(f"\n{asset}: no data (run: python scripts/replay.py {hint} --no-trades --assets {asset})")
         return
     sp = Spot(bars)
     hold_from = max(m["close"] for m in markets) - timedelta(days=holdout_days)
@@ -124,7 +132,8 @@ def run(asset: str, cache: Path, slip: float, holdout_days: int, totals: dict) -
         "A fair value, MID-window, edge>=3c": lambda m, q: rule_a(m, q, sp, 5, 11, 3, slip),
         "A fair value, MID-window, edge>=6c": lambda m, q: rule_a(m, q, sp, 5, 11, 6, slip),
     }
-    print(f"\n=== {asset} · {len(markets)} settled markets · slippage {slip:g}c ===")
+    span = f"{min(m['close'] for m in markets):%Y-%m-%d} .. {max(m['close'] for m in markets):%Y-%m-%d}"
+    print(f"\n=== {asset} · {len(markets)} settled markets {span} · slippage {slip:g}c ===")
     for name, rule in rules.items():
         dev, hold = [], []
         for m in markets:
@@ -136,9 +145,13 @@ def run(asset: str, cache: Path, slip: float, holdout_days: int, totals: dict) -
             r = pnl(side, m["result"] == "yes", price, slip)
             (hold if m["close"] >= hold_from else dev).append((r, r > 0))
             totals.setdefault(name, ([], []))[0 if m["close"] < hold_from else 1].append(r)
+            if name == CHOSEN and chosen is not None:
+                chosen.setdefault(asset, []).append((m["close"], r))
         print(f"  {name}")
         for label, xs in (("earlier", dev), ("last 7d", hold)):
             print("    " + line(label, [x[0] for x in xs]))
+        if before is not None:
+            print("    " + line("all", [x[0] for x in dev + hold]))
 
 
 def line(label: str, ps: list[float]) -> str:
@@ -156,10 +169,29 @@ def main() -> int:
     ap.add_argument("--cache", default=str(ROOT / "data" / "replay_cache"))
     ap.add_argument("--slippage", type=float, default=1.0)
     ap.add_argument("--holdout-days", type=int, default=7)
+    ap.add_argument("--before", help="YYYY-MM-DD: only markets closing before this date - the period the rule was "
+                                     "NOT chosen on (fresh out-of-sample test; HYPE/DOGE were chosen on 2026-10-05..)")
     a = ap.parse_args()
+    before = datetime.fromisoformat(a.before).replace(tzinfo=UTC) if a.before else None
     totals: dict[str, tuple[list[float], list[float]]] = {}
+    chosen: dict[str, list[tuple[datetime, float]]] = {}
     for asset in [x.strip().upper() for x in a.assets.split(",") if x.strip()]:
-        run(asset, Path(a.cache), a.slippage, a.holdout_days, totals)
+        run(asset, Path(a.cache), a.slippage, a.holdout_days, totals, before, chosen)
+    if before is not None and chosen:
+        print(f"\n=== FRESH-PERIOD VERDICT for the bot's rule ({CHOSEN}), markets before {a.before} ===")
+        print("    same rules as scripts/forward_report.py: PASS = 150+ trades and the whole 95% range above 0")
+        for asset, rs in chosen.items():
+            ps = [r for _, r in rs]
+            ci = boot(ps)
+            ok = len(ps) >= 150 and ci is not None and ci[0] > 0
+            bad = ci is not None and ci[1] < 0
+            word = "✅ PASS" if ok else "❌ FAIL" if bad else "⏳ INCONCLUSIVE"
+            print(f"  {asset:<5} {line('all', ps)}  {word}")
+            months: dict[str, list[float]] = {}
+            for when, r in rs:
+                months.setdefault(f"{when:%Y-%m}", []).append(r)
+            print("        by month: " + " · ".join(f"{k} {sum(v) / len(v):+.1f}c (n={len(v)})"
+                                                    for k, v in sorted(months.items())))
     if totals:
         print("\n=== ALL COINS ===")
         for name, (dev, hold) in totals.items():
