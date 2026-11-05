@@ -65,35 +65,37 @@ def verdict(days: float, per_market: list[float]) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--assets", default="HYPE,DOGE")
+    ap.add_argument("--assets", default=None, help="default: every coin in the forward test")
     ap.add_argument("--since", help="YYYY-MM-DD[THH:MM] UTC (default: when the bot started this test configuration)")
     a = ap.parse_args()
-    assets = [x.strip().upper() for x in a.assets.split(",") if x.strip()]
     repo = Repository(Database(Settings().database_url))
     marker = repo.get_setting("forward_test")
+    default = ",".join((marker.get("coins") or {}) if isinstance(marker, dict) else []) or "HYPE,DOGE"
+    assets = [x.strip().upper() for x in (a.assets or default).split(",") if x.strip()]
+    coin_start: dict[str, datetime] = {}
     if a.since:
-        since: datetime | None = datetime.fromisoformat(a.since)
+        since: datetime | None = _aware(datetime.fromisoformat(a.since))
+        coin_start = {x: since for x in assets}
     elif isinstance(marker, dict) and marker.get("start"):
-        since = datetime.fromisoformat(marker["start"])  # set by the bot when this test configuration started
-        print(f"Test configuration: {marker.get('config')}")
+        since = _aware(datetime.fromisoformat(marker["start"]))  # set by the bot when this test started
+        coins = marker.get("coins") or {}
+        coin_start = {x: max(since, _aware(datetime.fromisoformat(coins[x]))) if x in coins else since
+                      for x in assets}
+        print(f"Test rules: {marker.get('config')}")
     else:
         since = None
         print("⚠️ No forward-test start recorded (bot not in STRATEGY_MODE=btc with FAIR_VALUE_PURE/HYPE/DOGE yet?)"
               " - counting every paper trade")
-    if since is not None and since.tzinfo is None:
-        since = since.replace(tzinfo=UTC)
-    # only trades OPENED after the start (a trade from the old strategy that closed later is not counted)
+    # only trades OPENED after that coin's start (an old-strategy trade that closed later is not counted)
     rows = [p for p in repo.closed_positions(mode="paper", since=since, limit=1_000_000)
             if p.asset.upper() in assets and p.realized_pnl is not None
-            and (since is None or _aware(p.opened_at) >= since)]
+            and (p.asset.upper() not in coin_start or _aware(p.opened_at) >= coin_start[p.asset.upper()])]
     if not rows:
         print("No closed forward-test paper trades yet for " + ",".join(assets)
               + ". Let the bot run; check again in a few days.")
         return 0
-    start = since or min(_aware(p.opened_at) for p in rows)
-    days = (datetime.now(UTC) - start).total_seconds() / 86400
-    print(f"FORWARD TEST (paper) since {start:%Y-%m-%d} · {days:.1f} days · rules: PASS needs {MIN_DAYS}+ days, "
-          f"{MIN_MARKETS}+ markets, 95% range above 0\n")
+    now = datetime.now(UTC)
+    print(f"FORWARD TEST (paper) · rules: PASS needs {MIN_DAYS}+ days, {MIN_MARKETS}+ markets, 95% range above 0\n")
     for asset in assets:
         by_market: dict[str, list] = defaultdict(list)
         for p in rows:
@@ -113,16 +115,18 @@ def main() -> int:
             by_day[max(p.closed_at for p in ps if p.closed_at).strftime("%m-%d")] += pnl
         n = len(per_market)
         ci = boot(per_market)
+        first = coin_start.get(asset) or min(_aware(p.opened_at) for ps in by_market.values() for p in ps)
+        days = (now - first).total_seconds() / 86400
         rng = f" (95% range {ci[0]:+.1f}..{ci[1]:+.1f}¢)" if ci else " (range needs 10+ markets)"
-        print(f"{asset}: {n} markets · win {wins / n:.0%} · avg {sum(per_market) / n:+.2f}¢/contract after fees{rng}"
-              f" · P&L ${pnl_usd:+.2f}")
+        print(f"{asset} (since {first:%Y-%m-%d %H:%M} UTC, {days:.1f} days): {n} markets · win {wins / n:.0%} · "
+              f"avg {sum(per_market) / n:+.2f}¢/contract after fees{rng} · P&L ${pnl_usd:+.2f}")
         worst = min(by_day.items(), key=lambda kv: kv[1])
         best = max(by_day.items(), key=lambda kv: kv[1])
         print(f"   days traded {len(by_day)} · best day {best[0]} ${best[1]:+.2f} · worst day {worst[0]} "
               f"${worst[1]:+.2f}")
         print(f"   {verdict(days, per_market)}\n")
     print("Backtest expectation for comparison (mid-window, 6c edge): HYPE about +1..+3c, DOGE about +2..+3c per\n"
-          "contract, ~40% win rate. Long losing streaks are normal at that win rate. Research only - nothing traded.")
+          "contract; BTC/ETH/SOL/XRP lost money in the same backtest. ~40% win rate. Long losing streaks are normal at that win rate. Research only - nothing traded.")
     return 0
 
 

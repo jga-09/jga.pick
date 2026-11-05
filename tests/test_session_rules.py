@@ -165,11 +165,32 @@ def test_forward_test_start_is_recorded_and_reset_on_config_change(repo):
     from tests.conftest import make_settings
 
     def rt(**kw):
-        return BotRuntime(make_settings(strategy_mode="btc", assets="HYPE,DOGE", **kw), repo, FixtureKalshiClient(),
+        kw.setdefault("assets", "HYPE,DOGE")
+        return BotRuntime(make_settings(strategy_mode="btc", **kw), repo, FixtureKalshiClient(),
                           underlying=FixtureBTCFeed(), profiles=load_profiles(read_env=False))
 
     first = rt(fair_value_pure=True).forward_test
-    assert first and "HYPE,DOGE" in first["config"]
+    assert first and set(first["coins"]) == {"HYPE", "DOGE"}
     assert rt(fair_value_pure=True).forward_test == first  # restart keeps the same test
-    changed = rt(fair_value_pure=True, min_edge_cents=6).forward_test
-    assert changed["config"] != first["config"] and changed["start"] >= first["start"]
+    more = rt(fair_value_pure=True, assets="BTC,HYPE,DOGE").forward_test  # adding a coin keeps the others' clocks
+    assert more["start"] == first["start"] and more["coins"]["HYPE"] == first["coins"]["HYPE"] and "BTC" in more["coins"]
+    changed = rt(fair_value_pure=True, min_edge_cents=6).forward_test  # changing a rule restarts every coin
+    assert changed["config"] != first["config"] and changed["coins"]["HYPE"] >= first["coins"]["HYPE"]
+
+
+def test_old_forward_test_marker_is_migrated(repo):
+    from app.data.btc_feed import FixtureBTCFeed
+    from app.kalshi.fixtures import FixtureKalshiClient
+    from app.risk.profiles import load_profiles
+    from app.runtime import BotRuntime
+    from tests.conftest import make_settings
+
+    s = make_settings(strategy_mode="btc", assets="HYPE,DOGE,XRP", fair_value_pure=True)
+    probe = BotRuntime(s, repo, FixtureKalshiClient(), underlying=FixtureBTCFeed(),
+                       profiles=load_profiles(read_env=False))
+    repo.set_setting("forward_test", {"config": "assets=HYPE,DOGE " + probe.forward_test_signature(),
+                                      "start": "2026-11-04T06:00:00+00:00"})
+    m = BotRuntime(s, repo, FixtureKalshiClient(), underlying=FixtureBTCFeed(),
+                   profiles=load_profiles(read_env=False)).forward_test
+    assert m["start"] == "2026-11-04T06:00:00+00:00" and m["coins"]["HYPE"] == m["start"]
+    assert m["coins"]["XRP"] > m["start"]  # newly added coin starts now

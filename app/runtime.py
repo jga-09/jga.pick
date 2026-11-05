@@ -11,6 +11,7 @@ import shutil
 import html
 import json
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
@@ -482,25 +483,38 @@ class BotRuntime:
         )
 
     def forward_test_signature(self) -> str | None:
-        """Identifies one forward-test configuration; None when no fair-value forward test is configured."""
+        """Identifies one forward-test rule set (coins excluded: each coin keeps its own start time);
+        None when no fair-value forward test is configured."""
         s = self.settings
         if s.strategy_mode != "btc" or not (s.fair_value_pure or set(s.asset_list) - {"BTC"}):
             return None
-        return (f"assets={','.join(s.asset_list)} pure={s.fair_value_pure} edge>={s.min_edge_cents:g} "
+        return (f"pure={s.fair_value_pure} edge>={s.min_edge_cents:g} "
                 f"entry={s.entry_min_left_sec:g}-{s.entry_max_left_sec:g}s left "
                 f"skip_after_loss={s.skip_windows_after_loss} max_per_day={s.max_trades_per_day}")
 
     def _mark_forward_test(self) -> dict[str, Any] | None:
-        """Remember when the current forward-test configuration started; a changed configuration starts a new test
-        (scripts/forward_report.py only counts trades opened since then)."""
+        """Remember when each coin's forward test started. Changing a RULE starts a new test for every coin; adding a
+        coin only starts that coin's clock (scripts/forward_report.py counts each coin's trades from its own start)."""
         sig = self.forward_test_signature()
         if sig is None:
             return None
+        now = utcnow().isoformat()
         cur = self.repo.get_setting("forward_test")
+        if isinstance(cur, dict) and "coins" not in cur:  # older format: "assets=A,B <rules>"
+            m = re.match(r"assets=(\S*) (.*)", str(cur.get("config", "")))
+            if m:
+                cur = {"config": m.group(2), "start": cur.get("start", now),
+                       "coins": {a: cur.get("start", now) for a in m.group(1).split(",") if a}}
         if not isinstance(cur, dict) or cur.get("config") != sig:
-            cur = {"config": sig, "start": utcnow().isoformat()}
-            self.repo.set_setting("forward_test", cur)
+            cur = {"config": sig, "start": now, "coins": {}}
             log.info("FORWARD_TEST_START %s", sig)
+        coins = dict(cur.get("coins") or {})
+        for a in self.settings.asset_list:
+            if a not in coins:
+                coins[a] = now
+                log.info("FORWARD_TEST_COIN_START asset=%s", a)
+        cur["coins"] = coins
+        self.repo.set_setting("forward_test", cur)
         return cur
 
     def calibration_for(self, asset: str) -> CalibrationReport | None:
