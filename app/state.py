@@ -61,12 +61,13 @@ class BotState:
 
 
 class StateStore:
-    def __init__(self, repo: Any, defaults: BotState) -> None:
+    def __init__(self, repo: Any, defaults: BotState, key: str = STATE_KEY) -> None:
         self.repo = repo
-        self.state = BotState.from_dict(repo.get_setting(STATE_KEY), defaults)
+        self.key = key
+        self.state = BotState.from_dict(repo.get_setting(key), defaults)
 
     def save(self) -> None:
-        self.repo.set_setting(STATE_KEY, self.state.to_dict())
+        self.repo.set_setting(self.key, self.state.to_dict())
 
     def update(self, **changes: Any) -> BotState:
         for k, v in changes.items():

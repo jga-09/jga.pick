@@ -96,6 +96,7 @@ class RiskDecisionRow(Base):
 
 class _OrderMixin:
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[int] = mapped_column(Integer, default=0)  # Telegram user id of the account owner
     client_order_id: Mapped[str] = mapped_column(String(64), unique=True)
     ticker: Mapped[str] = mapped_column(String(80), index=True)
     side: Mapped[str] = mapped_column(String(4))
@@ -123,6 +124,7 @@ class LiveOrderRow(_OrderMixin, Base):
 class PositionRow(Base):
     __tablename__ = "positions"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[int] = mapped_column(Integer, default=0)  # Telegram user id of the account owner
     mode: Mapped[str] = mapped_column(String(8))
     ticker: Mapped[str] = mapped_column(String(80), index=True)
     event_ticker: Mapped[str] = mapped_column(String(80), default="")
@@ -148,6 +150,7 @@ class PositionRow(Base):
 class TradeRow(Base):
     __tablename__ = "trades"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[int] = mapped_column(Integer, default=0)
     position_id: Mapped[int] = mapped_column(Integer, index=True)
     mode: Mapped[str] = mapped_column(String(8))
     ticker: Mapped[str] = mapped_column(String(80))
@@ -163,6 +166,20 @@ class DailyPnlRow(Base):
     __tablename__ = "daily_pnl"
     day: Mapped[str] = mapped_column(String(10), primary_key=True)
     mode: Mapped[str] = mapped_column(String(8), primary_key=True)
+    realized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    fees: Mapped[float] = mapped_column(Float, default=0.0)
+    trades: Mapped[int] = mapped_column(Integer, default=0)
+    wins: Mapped[int] = mapped_column(Integer, default=0)
+    losses: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class AccountDailyPnlRow(Base):
+    """Daily P&L per account (replaces daily_pnl, whose primary key could not hold an account)."""
+
+    __tablename__ = "daily_pnl_acct"
+    day: Mapped[str] = mapped_column(String(10), primary_key=True)
+    mode: Mapped[str] = mapped_column(String(8), primary_key=True)
+    account_id: Mapped[int] = mapped_column(Integer, primary_key=True, default=0)
     realized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
     fees: Mapped[float] = mapped_column(Float, default=0.0)
     trades: Mapped[int] = mapped_column(Integer, default=0)

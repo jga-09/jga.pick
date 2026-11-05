@@ -31,6 +31,7 @@ class Position:
     close_reason: str | None = None
     client_order_id: str = ""
     id: int | None = None
+    account_id: int = 0  # Telegram user id of the account that owns this position
 
     @property
     def cost(self) -> float:

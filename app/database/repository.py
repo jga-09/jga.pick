@@ -8,11 +8,12 @@ from dataclasses import fields
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.database.db import SCHEMA_VERSION, Database
 from app.database.models import (
+    AccountDailyPnlRow,
     BotEventRow,
     ObservationRow,
     TradeContextRow,
@@ -42,8 +43,39 @@ class Repository:
 
     def init(self) -> None:
         self.db.create_all()
+        self._migrate_accounts()
         if self.get_setting("schema_version") is None:
             self.set_setting("schema_version", SCHEMA_VERSION)
+
+    # ------------------------------------------------------------ accounts
+    _ACCOUNT_TABLES = ("positions", "trades", "paper_orders", "live_orders")
+
+    def _migrate_accounts(self) -> None:
+        """Add account_id to databases created before multi-user support (existing rows -> account 0 = legacy)."""
+        with self.db.engine.begin() as conn:
+            for table in self._ACCOUNT_TABLES:
+                cols = {r[1] for r in conn.execute(text(f"PRAGMA table_info({table})"))}
+                if cols and "account_id" not in cols:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN account_id INTEGER NOT NULL DEFAULT 0"))
+                    log.info("DB_MIGRATED table=%s added=account_id", table)
+                conn.execute(text(f"CREATE INDEX IF NOT EXISTS ix_{table}_account ON {table} (account_id)"))
+            new_rows = conn.execute(text("SELECT COUNT(*) FROM daily_pnl_acct")).scalar() or 0
+            if not new_rows:
+                conn.execute(text("INSERT INTO daily_pnl_acct (day, mode, account_id, realized_pnl, fees, trades, "
+                                  "wins, losses) SELECT day, mode, 0, realized_pnl, fees, trades, wins, losses "
+                                  "FROM daily_pnl"))
+
+    def adopt_legacy(self, owner: int) -> int:
+        """Give rows written before multi-user support (account 0) to ``owner``. Returns rows moved."""
+        if not owner:
+            return 0
+        moved = 0
+        with self.db.session() as s:
+            for model in (PositionRow, TradeRow, PaperOrderRow, LiveOrderRow, AccountDailyPnlRow):
+                moved += s.execute(update(model).where(model.account_id == 0).values(account_id=owner)).rowcount or 0
+        if moved:
+            log.info("LEGACY_DATA_ADOPTED owner=%s rows=%s", owner, moved)
+        return moved
 
     # ------------------------------------------------------------ settings
     def get_setting(self, key: str, default: Any = None) -> Any:
@@ -110,7 +142,7 @@ class Repository:
             ))
 
     # -------------------------------------------------------------- orders
-    def client_order_exists(self, client_order_id: str) -> bool:
+    def client_order_exists(self, client_order_id: str) -> bool:  # global: ids are unique across accounts
         with self.db.session() as s:
             for model in (PaperOrderRow, LiveOrderRow):
                 if s.scalar(select(model.id).where(model.client_order_id == client_order_id)):
@@ -140,10 +172,13 @@ class Repository:
                 for k, v in kw.items():
                     setattr(row, k, v)
 
-    def live_orders(self, statuses: tuple[str, ...] | None = None, limit: int = 500) -> list[dict[str, Any]]:
+    def live_orders(self, statuses: tuple[str, ...] | None = None, limit: int = 500,
+                    account: int | None = None) -> list[dict[str, Any]]:
         """Live order rows (newest first), optionally filtered by status - used for crash recovery."""
         with self.db.session() as s:
             q = select(LiveOrderRow).order_by(LiveOrderRow.id.desc()).limit(limit)
+            if account is not None:
+                q = q.where(LiveOrderRow.account_id == account)
             if statuses:
                 q = q.where(LiveOrderRow.status.in_(statuses))
             return [{"client_order_id": r.client_order_id, "ticker": r.ticker, "side": r.side, "action": r.action,
@@ -168,18 +203,23 @@ class Repository:
     def _to_position(self, row: PositionRow) -> Position:
         return Position(**{n: getattr(row, n) for n in _POSITION_FIELDS})
 
-    def open_positions(self, mode: str | None = None) -> list[Position]:
+    def open_positions(self, mode: str | None = None, account: int | None = None) -> list[Position]:
         with self.db.session() as s:
             q = select(PositionRow).where(PositionRow.status == "open")
+            if account is not None:
+                q = q.where(PositionRow.account_id == account)
             if mode:
                 q = q.where(PositionRow.mode == mode)
             return [self._to_position(r) for r in s.scalars(q.order_by(PositionRow.opened_at))]
 
     def closed_positions(
-        self, *, mode: str | None = None, since: datetime | None = None, limit: int = 20, offset: int = 0
+        self, *, mode: str | None = None, since: datetime | None = None, limit: int = 20, offset: int = 0,
+        account: int | None = None,
     ) -> list[Position]:
         with self.db.session() as s:
             q = select(PositionRow).where(PositionRow.status == "closed")
+            if account is not None:
+                q = q.where(PositionRow.account_id == account)
             if mode:
                 q = q.where(PositionRow.mode == mode)
             if since:
@@ -187,25 +227,31 @@ class Repository:
             q = q.order_by(PositionRow.closed_at.desc()).limit(limit).offset(offset)
             return [self._to_position(r) for r in s.scalars(q)]
 
-    def markets_entered_since(self, mode: str, since: datetime) -> int:
+    def markets_entered_since(self, mode: str, since: datetime, account: int | None = None) -> int:
         """Distinct markets with a position opened at/after ``since`` (partial exits do not double count)."""
         with self.db.session() as s:
             q = select(func.count(func.distinct(PositionRow.ticker))).where(
                 PositionRow.mode == mode, PositionRow.opened_at >= since)
+            if account is not None:
+                q = q.where(PositionRow.account_id == account)
             return int(s.scalar(q) or 0)
 
-    def count_closed(self, mode: str | None = None) -> int:
+    def count_closed(self, mode: str | None = None, account: int | None = None) -> int:
         with self.db.session() as s:
             q = select(func.count(PositionRow.id)).where(PositionRow.status == "closed")
             if mode:
                 q = q.where(PositionRow.mode == mode)
+            if account is not None:
+                q = q.where(PositionRow.account_id == account)
             return int(s.scalar(q) or 0)
 
-    def realized_total(self, mode: str) -> float:
+    def realized_total(self, mode: str, account: int | None = None) -> float:
         with self.db.session() as s:
             q = select(func.coalesce(func.sum(PositionRow.realized_pnl), 0.0)).where(
                 PositionRow.status == "closed", PositionRow.mode == mode
             )
+            if account is not None:
+                q = q.where(PositionRow.account_id == account)
             return float(s.scalar(q) or 0.0)
 
     def add_trade(self, **kw: Any) -> None:
@@ -213,12 +259,14 @@ class Repository:
             s.add(TradeRow(**kw))
 
     # ---------------------------------------------------------- daily pnl
-    def record_daily(self, mode: str, pnl: float, fees: float, won: bool, when: datetime | None = None) -> None:
+    def record_daily(self, mode: str, pnl: float, fees: float, won: bool, when: datetime | None = None,
+                     account: int = 0) -> None:
         key = day_key(when)
         with self.db.session() as s:
-            row = s.get(DailyPnlRow, (key, mode))
+            row = s.get(AccountDailyPnlRow, (key, mode, account))
             if row is None:
-                row = DailyPnlRow(day=key, mode=mode, realized_pnl=0.0, fees=0.0, trades=0, wins=0, losses=0)
+                row = AccountDailyPnlRow(day=key, mode=mode, account_id=account, realized_pnl=0.0, fees=0.0,
+                                         trades=0, wins=0, losses=0)
                 s.add(row)
             row.realized_pnl = round(row.realized_pnl + pnl, 2)
             row.fees = round(row.fees + fees, 2)
@@ -226,9 +274,9 @@ class Repository:
             row.wins += 1 if won else 0
             row.losses += 0 if won else 1
 
-    def daily(self, mode: str, day: str | None = None) -> DailyPnlRow | None:
+    def daily(self, mode: str, day: str | None = None, account: int = 0) -> AccountDailyPnlRow | None:
         with self.db.session() as s:
-            return s.get(DailyPnlRow, (day or day_key(), mode))
+            return s.get(AccountDailyPnlRow, (day or day_key(), mode, account))
 
     # -------------------------------------------------------- observations
     def add_observation(self, obs: Any) -> bool:
@@ -296,10 +344,13 @@ class Repository:
             for k, v in kw.items():
                 setattr(row, k, v)
 
-    def trade_contexts(self, limit: int = 500) -> list[dict[str, Any]]:
+    def trade_contexts(self, limit: int = 500, account: int | None = None) -> list[dict[str, Any]]:
         with self.db.session() as s:
-            rows = s.scalars(select(TradeContextRow).where(TradeContextRow.won.is_not(None))
-                             .order_by(TradeContextRow.updated_at.desc()).limit(limit))
+            q = select(TradeContextRow).where(TradeContextRow.won.is_not(None))
+            if account is not None:
+                q = q.where(TradeContextRow.position_id.in_(
+                    select(PositionRow.id).where(PositionRow.account_id == account)))
+            rows = s.scalars(q.order_by(TradeContextRow.updated_at.desc()).limit(limit))
             return [{"position_id": r.position_id, "ticker": r.ticker, "entry": json.loads(r.entry),
                      "exit": json.loads(r.exit), "tags": json.loads(r.tags), "won": r.won,
                      "summary": r.summary, "ts": r.updated_at} for r in rows]
@@ -313,22 +364,27 @@ class Repository:
                     "won": r.won, "summary": r.summary}
 
     # ---------------------------------------------------------- paper reset
-    def reset_paper(self) -> dict[str, int]:
-        """Delete all PAPER trading history (positions, trades, orders, daily P&L, trade notes).
-
-        Research data (observations, signals, snapshots) and settings are kept.
+    def reset_paper(self, account: int | None = None) -> dict[str, int]:
+        """Delete PAPER trading history (positions, trades, orders, daily P&L, trade notes) - of one account, or of
+        every account when ``account`` is None. Research data (observations, signals, snapshots) and settings stay.
         """
+        def mine(model: Any) -> Any:
+            return True if account is None else model.account_id == account
+
         with self.db.session() as s:
-            ids = list(s.scalars(select(PositionRow.id).where(PositionRow.mode == "paper")))
+            ids = list(s.scalars(select(PositionRow.id).where(PositionRow.mode == "paper", mine(PositionRow))))
             out = {
                 "positions": len(ids),
-                "trades": s.execute(delete(TradeRow).where(TradeRow.mode == "paper")).rowcount or 0,
-                "paper_orders": s.execute(delete(PaperOrderRow)).rowcount or 0,
-                "daily_pnl": s.execute(delete(DailyPnlRow).where(DailyPnlRow.mode == "paper")).rowcount or 0,
+                "trades": s.execute(delete(TradeRow).where(TradeRow.mode == "paper", mine(TradeRow))).rowcount or 0,
+                "paper_orders": s.execute(delete(PaperOrderRow).where(mine(PaperOrderRow))).rowcount or 0,
+                "daily_pnl": s.execute(delete(AccountDailyPnlRow).where(
+                    AccountDailyPnlRow.mode == "paper", mine(AccountDailyPnlRow))).rowcount or 0,
                 "trade_notes": s.execute(delete(TradeContextRow).where(
                     TradeContextRow.position_id.in_(ids))).rowcount or 0 if ids else 0,
             }
-            s.execute(delete(PositionRow).where(PositionRow.mode == "paper"))
+            if account is None:
+                s.execute(delete(DailyPnlRow).where(DailyPnlRow.mode == "paper"))  # pre-multi-user table
+            s.execute(delete(PositionRow).where(PositionRow.mode == "paper", mine(PositionRow)))
         return out
 
     # -------------------------------------------------------------- events
@@ -355,3 +411,64 @@ class Repository:
                 res = s.execute(delete(model).where(col < now - timedelta(days=days)))
                 out[name] = res.rowcount or 0
         return out
+
+
+class AccountRepo:
+    """One user's view of the database: every trading read/write is scoped to ``account`` (a Telegram user id).
+
+    Research data, settings and events are shared and pass straight through to the underlying Repository, so the
+    portfolio and executors work unchanged on top of it - they simply never see another user's trades.
+    """
+
+    def __init__(self, base: Repository, account: int) -> None:
+        self.base = base
+        self.account = account
+        self.db = base.db
+
+    def __getattr__(self, name: str) -> Any:  # shared (non-trading) data
+        return getattr(self.base, name)
+
+    # positions / trades / orders / daily P&L - always this account only
+    def save_position(self, p: Position) -> int:
+        p.account_id = self.account
+        return self.base.save_position(p)
+
+    def open_positions(self, mode: str | None = None) -> list[Position]:
+        return self.base.open_positions(mode, account=self.account)
+
+    def closed_positions(self, *, mode: str | None = None, since: datetime | None = None, limit: int = 20,
+                         offset: int = 0) -> list[Position]:
+        return self.base.closed_positions(mode=mode, since=since, limit=limit, offset=offset, account=self.account)
+
+    def markets_entered_since(self, mode: str, since: datetime) -> int:
+        return self.base.markets_entered_since(mode, since, account=self.account)
+
+    def count_closed(self, mode: str | None = None) -> int:
+        return self.base.count_closed(mode, account=self.account)
+
+    def realized_total(self, mode: str) -> float:
+        return self.base.realized_total(mode, account=self.account)
+
+    def add_trade(self, **kw: Any) -> None:
+        self.base.add_trade(**{**kw, "account_id": self.account})
+
+    def add_paper_order(self, **kw: Any) -> None:
+        self.base.add_paper_order(**{**kw, "account_id": self.account})
+
+    def add_live_order(self, **kw: Any) -> int:
+        return self.base.add_live_order(**{**kw, "account_id": self.account})
+
+    def live_orders(self, statuses: tuple[str, ...] | None = None, limit: int = 500) -> list[dict[str, Any]]:
+        return self.base.live_orders(statuses, limit, account=self.account)
+
+    def record_daily(self, mode: str, pnl: float, fees: float, won: bool, when: datetime | None = None) -> None:
+        self.base.record_daily(mode, pnl, fees, won, when, account=self.account)
+
+    def daily(self, mode: str, day: str | None = None) -> AccountDailyPnlRow | None:
+        return self.base.daily(mode, day, account=self.account)
+
+    def trade_contexts(self, limit: int = 500) -> list[dict[str, Any]]:
+        return self.base.trade_contexts(limit, account=self.account)
+
+    def reset_paper(self) -> dict[str, int]:
+        return self.base.reset_paper(account=self.account)

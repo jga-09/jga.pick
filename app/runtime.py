@@ -13,7 +13,9 @@ import json
 import logging
 import re
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -23,10 +25,12 @@ from app import DISPLAY_NAME
 from app.config import Settings
 from app.data.settlement_index import SettlementIndexFeed
 from app.data.underlying import NullUnderlyingProvider, UnderlyingPriceProvider
-from app.database.repository import Repository
+from app.accounts import Account, AccountStore
+from app.database.repository import AccountRepo, Repository
 from app.errors import KalshiAuthError, KalshiError, TradingError
 from app.kalshi.auth import KalshiSigner
 from app.kalshi.contract import interpret_contract
+from app.kalshi.client import KalshiClient
 from app.kalshi.keystore import KeyStore
 from app.kalshi.market_data import MarketDataService, MarketInfo, MarketSnapshot
 from app.kalshi.markets import MarketDiscovery
@@ -103,8 +107,8 @@ class BotRuntime:
         profiles: dict[RiskLevel, RiskProfile] | None = None,
     ) -> None:
         self.settings = settings
-        self.repo = repo
-        self.client = client
+        self.base_repo = repo  # shared database; trading data goes through each user's AccountRepo
+        self.client = client  # shared market-data client (signs with the owner's key, as before)
         self.fixture_mode = settings.data_source == "fixture"
         self.underlying = underlying or NullUnderlyingProvider()
         self.base_profiles = profiles or load_profiles()
@@ -114,12 +118,13 @@ class BotRuntime:
             auto_trade=settings.auto_trading,
             mode="paper",  # always boot in PAPER; switching to live needs an explicit, confirmed action
         )
-        self.store = StateStore(repo, defaults)
-        if self.store.state.mode == "live" and not settings.live_allowed:
-            self.store.state.mode = "paper"  # config no longer allows live -> fail safe
-        if self.store.state.auto_trade and self.store.state.mode == "live" and not settings.live_autotrade_allowed:
-            self.store.state.auto_trade = False
-        self.store.save()
+        self._defaults = defaults
+        self.global_store = StateStore(repo, defaults)  # bot-wide switches + the owner's own settings
+        self.owner = settings.owner_id
+        if self.owner:
+            repo.adopt_legacy(self.owner)  # single-account data from before multi-user support -> the owner
+        self.accounts: dict[int, Account] = {}
+        self._current: ContextVar[int | None] = ContextVar(f"rt_account_{id(self)}", default=None)
 
         self.discovery = MarketDiscovery(client, settings)
         self.market_data = MarketDataService(client, settings.orderbook_depth)
@@ -158,12 +163,7 @@ class BotRuntime:
                                     sit_out_after_loss_sec=settings.skip_windows_after_loss
                                     * settings.market_duration_minutes * 60,
                                     max_trades_per_day=settings.max_trades_per_day))
-        self.portfolio = Portfolio(repo, settings.paper_starting_balance)
-        self.paper = PaperExecutor(self.portfolio, settings.paper_slippage_cents, settings.fee_rate)
-        # The live executor is only constructed when configuration permits live trading.
-        self.live = LiveExecutor(client, settings, self.portfolio) if settings.live_allowed else None
-        self.executor = TradeExecutor(self.store, self.portfolio, self.paper, self.live)
-        self.tickets = TicketStore()
+        self.account(self.owner)  # build the owner's account now (fail-safe state checks run here)
         self.ws: KalshiWebSocket | None = None
         self.notifier: Notifier | None = None
 
@@ -178,10 +178,112 @@ class BotRuntime:
         self._daily_limit_alerted: str | None = None
         self._last_purge = 0.0
 
+    # -------------------------------------------------------------- accounts
+    def allowed_user(self, uid: int | None) -> bool:
+        return uid is not None and (uid == self.owner or uid in self.settings.admin_ids)
+
+    def account(self, uid: int | None = None) -> Account:
+        """The account of ``uid`` (default: the user this task is acting for, else the owner)."""
+        uid = self._current.get() if uid is None else uid
+        uid = self.owner if uid is None else uid
+        acct = self.accounts.get(uid)
+        if acct is not None:
+            return acct
+        if not self.allowed_user(uid):
+            raise PermissionError("not an allowed Telegram user")  # never create accounts for strangers
+        return self._build_account(uid)
+
+    def _build_account(self, uid: int) -> Account:
+        s = self.settings
+        owner = uid == self.owner
+        arepo = AccountRepo(self.base_repo, uid)
+        user_store = self.global_store if owner else StateStore(self.base_repo, replace(self._defaults),
+                                                                 key=f"bot_state:user:{uid}")
+        store = AccountStore(self.global_store, user_store)
+        st = store.state
+        if st.mode == "live" and not s.live_allowed:
+            st.mode = "paper"  # config no longer allows live -> fail safe
+        if st.auto_trade and st.mode == "live" and not s.live_autotrade_allowed:
+            st.auto_trade = False
+        store.save()
+        keys = KeyStore(s.kalshi_key_dir if owner else s.kalshi_key_dir / f"user_{uid}")
+        if owner:
+            client = self.client
+        else:  # each user signs their own orders with their own key (never another user's)
+            signer = None
+            try:
+                signer = keys.load()
+            except Exception as exc:  # noqa: BLE001 - a broken stored key must not stop the bot
+                log.error("USER_KEY_UNREADABLE user=%s error=%s", uid, type(exc).__name__)
+            client = self.client if self.fixture_mode else KalshiClient(s, signer)
+        portfolio = Portfolio(arepo, s.paper_starting_balance)
+        paper = PaperExecutor(portfolio, s.paper_slippage_cents, s.fee_rate)
+        # The live executor is only constructed when configuration permits live trading.
+        live = LiveExecutor(client, s, portfolio) if s.live_allowed else None
+        acct = Account(uid, arepo, store, portfolio, paper, live, TradeExecutor(store, portfolio, paper, live),
+                       TicketStore(), client, keys, owner)
+        self.accounts[uid] = acct
+        if not owner:
+            log.info("ACCOUNT_OPENED user=%s", uid)
+        return acct
+
+    def all_accounts(self) -> list[Account]:
+        """Owner + every allowed admin (accounts are created on first use)."""
+        ids = [self.owner] + sorted(i for i in self.settings.admin_ids if i != self.owner)
+        return [self.account(i) for i in ids if self.allowed_user(i) or i == self.owner]
+
+    @contextmanager
+    def as_user(self, uid: int | None) -> Iterator[Account]:
+        """Act for ``uid`` inside this block (Telegram handlers, per-user trading loops)."""
+        acct = self.account(uid)
+        token = self._current.set(acct.user_id)
+        try:
+            yield acct
+        finally:
+            self._current.reset(token)
+
+    @property
+    def current_user(self) -> int:
+        return self.account().user_id
+
     # ------------------------------------------------------------ properties
     @property
-    def state(self) -> BotState:
-        return self.store.state
+    def repo(self) -> AccountRepo:
+        return self.account().repo
+
+    @property
+    def store(self) -> AccountStore:
+        return self.account().store
+
+    @property
+    def state(self) -> Any:
+        return self.account().store.state
+
+    @property
+    def portfolio(self) -> Portfolio:
+        return self.account().portfolio
+
+    @property
+    def paper(self) -> PaperExecutor:
+        return self.account().paper
+
+    @property
+    def live(self) -> LiveExecutor | None:
+        return self.account().live
+
+    @live.setter
+    def live(self, value: LiveExecutor | None) -> None:  # tests and fixtures swap the live executor
+        acct = self.account()
+        acct.live = value
+        acct.executor.live = value
+
+    @property
+    def executor(self) -> TradeExecutor:
+        return self.account().executor
+
+    @property
+    def tickets(self) -> TicketStore:
+        return self.account().tickets
 
     def profile(self, level: RiskLevel | None = None) -> RiskProfile:
         level = level or self.state.risk_level
@@ -197,39 +299,49 @@ class BotRuntime:
     # ------------------------------------------------------- Kalshi API key
     @property
     def key_store(self) -> KeyStore:
-        return KeyStore(self.settings.kalshi_key_dir)
+        acct = self.account()
+        base = self.settings.kalshi_key_dir
+        return KeyStore(base if acct.is_owner else base / f"user_{acct.user_id}")
+
+    @property
+    def trading_client(self) -> Any:
+        """Kalshi client signing with the CURRENT user's key (the owner's is the bot's shared client)."""
+        acct = self.account()
+        return self.client if acct.is_owner else acct.client
 
     def kalshi_key_source(self) -> str:
         """'env', 'telegram' or 'none' - which credentials the client is signing with."""
-        if getattr(self.client, "signer", None) is None:
+        acct = self.account()
+        if getattr(self.trading_client, "signer", None) is None:
             return "none"
-        return "env" if self.settings.env_key_usable else "telegram"
+        return "env" if acct.is_owner and self.settings.env_key_usable else "telegram"
 
     async def set_kalshi_key(self, key_id: str, pem: bytes) -> float | None:
         """Verify a key against Kalshi, then store it. Returns the balance in USD (None if unverified).
 
         Raises KalshiAuthError if the key is invalid or Kalshi rejects it; nothing is stored then."""
-        if self.fixture_mode or not hasattr(self.client, "signer"):
+        client = self.trading_client
+        if self.fixture_mode or not hasattr(client, "signer"):
             raise KalshiAuthError(0, "fixture mode does not use Kalshi credentials")
         signer = KalshiSigner(key_id, pem)  # raises on a bad PEM (message never contains key material)
-        old = self.client.signer
-        self.client.signer = signer
+        old = client.signer
+        client.signer = signer
         balance: float | None = None
         try:
-            raw = await self.client.get_balance()
+            raw = await client.get_balance()
             cents_ = raw.get("balance")
             balance = None if cents_ is None else float(cents_) / 100
         except KalshiAuthError:
-            self.client.signer = old
-            self.client.auth_failed = False
+            client.signer = old
+            client.auth_failed = False
             raise
         except KalshiError:
             pass  # network problem: keep the key, report it as not yet verified
         self.key_store.save(key_id, pem)
-        if self.ws is not None:
+        if self.ws is not None and self.account().is_owner:
             self.ws.signer = signer
-        self.repo.add_event("KALSHI_KEY_SET", f"key {key_id[:4]}... via Telegram")
-        log.info("KALSHI_KEY_SET key=%s... verified=%s", key_id[:4], balance is not None)
+        self.repo.add_event("KALSHI_KEY_SET", f"user {self.current_user} key {key_id[:4]}... via Telegram")
+        log.info("KALSHI_KEY_SET user=%s key=%s... verified=%s", self.current_user, key_id[:4], balance is not None)
         return balance
 
     async def kalshi_account(self) -> dict[str, Any]:
@@ -238,9 +350,10 @@ class BotRuntime:
         if out["source"] == "none":
             return out
         try:
-            raw = await asyncio.wait_for(self.client.get_balance(), 8)
+            client = self.trading_client
+            raw = await asyncio.wait_for(client.get_balance(), 8)
             out["balance"] = None if raw.get("balance") is None else float(raw["balance"]) / 100
-            pos = await asyncio.wait_for(self.client.get_positions(), 8)
+            pos = await asyncio.wait_for(client.get_positions(), 8)
             out["positions"] = sum(1 for p in pos.get("market_positions", []) if p.get("position"))
         except KalshiAuthError:
             out["error"] = "Kalshi rejected the key"
@@ -251,9 +364,9 @@ class BotRuntime:
     def clear_kalshi_key(self) -> bool:
         removed = self.key_store.clear()
         if self.kalshi_key_source() == "telegram":
-            self.client.signer = None
+            self.trading_client.signer = None
         if removed:
-            self.repo.add_event("KALSHI_KEY_REMOVED", "via Telegram")
+            self.repo.add_event("KALSHI_KEY_REMOVED", f"user {self.current_user} via Telegram")
         return removed
 
     def pnl_card(self, mode: str, title: str = "TODAY'S P&L", last: Position | None = None,

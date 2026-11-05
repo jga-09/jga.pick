@@ -191,6 +191,14 @@ class Settings(BaseSettings):
         return frozenset(ids)
 
     @property
+    def owner_id(self) -> int:
+        """First id in TELEGRAM_ADMIN_IDS: keeps the pre-multi-user account (its data and Kalshi key). 0 if none."""
+        for part in self.telegram_admin_ids.replace(" ", "").split(","):
+            if part.lstrip("-").isdigit():
+                return int(part)
+        return 0
+
+    @property
     def asset_list(self) -> list[str]:
         return [a.strip().upper() for a in self.assets.split(",") if a.strip()]
 
