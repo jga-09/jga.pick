@@ -17,6 +17,10 @@ the trade's day, per coin, by 10% bucket, shrunk toward the model when data is t
 an uncertainty band (volatility +/-20%, 3 bps settlement-index basis). Daily loss limit: 6% of the day's starting
 bankroll. Reported on the earlier days and, separately and from a fresh bankroll, on the untouched last 7 days.
 
+Each Kelly bet is also capped at --max-risk dollars (default $50): HYPE/DOGE books cannot fill thousands of
+dollars per window, so uncapped compounding numbers are fantasy. --placebo redraws every outcome as if Kalshi's
+price were exactly right: if the method still "finds" an edge there, the edge is an artifact.
+
 Limits: 1-minute quotes (no order book: real fills may be worse, size may not be available), trades are taken one
 at a time in close-time order (overlapping markets are not netted), Coinbase prices as a proxy for CF Benchmarks.
 Kelly cannot create an edge: with a negative edge it shrinks bets toward zero, it never turns losses into profit.
@@ -136,6 +140,7 @@ class Result:
     streak: int = 0
     longest: int = 0
     rets: list[float] | None = None
+    taken: list | None = None  # (trade, contracts, pnl) for the diagnostics
 
     def line(self) -> str:
         if not self.trades:
@@ -151,8 +156,9 @@ class Result:
                 f"risk-adj {mean / sd * math.sqrt(len(rets)):+5.2f}")
 
 
-def simulate(name: str, trades: list[Trade], start: float, fee_rate: float, mode: KellyMode | None) -> Result:
-    r = Result(name, start, bankroll=start, peak=start, rets=[])
+def simulate(name: str, trades: list[Trade], start: float, fee_rate: float, mode: KellyMode | None,
+             max_risk: float = 0.0) -> Result:
+    r = Result(name, start, bankroll=start, peak=start, rets=[], taken=[])
     day, day_start, day_pnl = None, start, 0.0
     for t in trades:
         if t.close.date() != day:
@@ -166,7 +172,8 @@ def simulate(name: str, trades: list[Trade], start: float, fee_rate: float, mode
         else:
             ks = kelly_size(mode, KellyInput(p_point=t.p, p_low=t.p_low, price_cents=t.price, bankroll_usd=r.bankroll,
                                              remaining_daily_loss_usd=daily_left, remaining_open_risk_usd=r.bankroll,
-                                             calibrated=True, fee_rate=fee_rate))
+                                             calibrated=True, fee_rate=fee_rate,
+                                             max_position_usd=max_risk or None))
             n = ks.contracts
         if n < 1:
             continue
@@ -180,6 +187,7 @@ def simulate(name: str, trades: list[Trade], start: float, fee_rate: float, mode
         r.staked += cost
         r.pnl += pnl
         r.rets.append(pnl / before)  # type: ignore[union-attr]
+        r.taken.append((t, n, pnl))  # type: ignore[union-attr]
         r.streak = 0 if t.won else r.streak + 1
         r.longest = max(r.longest, r.streak)
         r.peak = max(r.peak, r.bankroll)
@@ -198,12 +206,26 @@ def main() -> int:
     ap.add_argument("--fee-rate", type=float, default=0.07)
     ap.add_argument("--bankroll", type=float, default=1000.0)
     ap.add_argument("--holdout-days", type=int, default=7)
+    ap.add_argument("--max-risk", type=float, default=50.0,
+                    help="max $ at risk per trade (default 50: these books cannot fill much more; 0 = no cap)")
+    ap.add_argument("--placebo", action="store_true",
+                    help="sanity check: redraw every outcome as if Kalshi's price were exactly right. Any 'edge' "
+                         "left is an artifact of the method, not a real edge")
     a = ap.parse_args()
     trades: list[Trade] = []
     for asset in [x.strip().upper() for x in a.assets.split(",") if x.strip()]:
         trades += collect(asset, Path(a.cache), a.edge, a.slippage)
     if not trades:
         return 1
+    if a.placebo:
+        import random
+
+        rng = random.Random(1)
+        # "Kalshi is always right": each trade wins with the probability its price implied (ask minus slippage minus
+        # ~1c half-spread). With no edge by construction, every sizing method must lose about the fees here.
+        trades = [Trade(t.close, t.asset, t.side, t.price, rng.random() < max(0.01, (t.price - a.slippage - 1) / 100),
+                        t.p, t.p_low) for t in trades]
+        print("🧪 PLACEBO: outcomes redrawn as if Kalshi's price were exactly right - a sound method shows NO edge")
     trades = calibrate(trades)
     cut = max(t.close for t in trades) - timedelta(days=a.holdout_days)
     parts = (("EARLIER DAYS", [t for t in trades if t.close < cut]),
@@ -215,8 +237,22 @@ def main() -> int:
         if not ts:
             continue
         print(simulate("FIXED", ts, a.bankroll, a.fee_rate, None).line())
+        low = None
         for m in KellyMode:
-            print(simulate(m.value.upper(), ts, a.bankroll, a.fee_rate, m).line())
+            res = simulate(m.value.upper(), ts, a.bankroll, a.fee_rate, m, a.max_risk)
+            low = low or res
+            print(res.line())
+        if low and low.taken:
+            k = low.taken
+            print(f"  LOW trades: avg price {sum(t.price for t, _, _ in k) / len(k):.1f}c · avg calibrated p "
+                  f"{sum(t.p for t, _, _ in k) / len(k):.1%} vs actual win {sum(t.won for t, _, _ in k) / len(k):.1%}"
+                  f" · YES {sum(t.side == 'yes' for t, _, _ in k)} / NO {sum(t.side == 'no' for t, _, _ in k)}")
+            months: dict[str, list] = defaultdict(list)
+            for t, n, pnl in k:
+                months[f"{t.close:%Y-%m}"].append((n * t.price / 100, pnl, t.won))
+            print("  LOW by month: " + " · ".join(
+                f"{mo} n={len(v)} win {sum(w for *_, w in v) / len(v):.0%} ROI {sum(p for _, p, _ in v) / sum(c for c, _, _ in v):+.0%}"
+                for mo, v in sorted(months.items())))
     print("\nHow to read it: sizing cannot create an edge. If FIXED loses, Kelly should lose LESS (it bets less when\n"
           "the cautious edge is small) - not win. Only trust a Kelly mode if it is positive on BOTH parts.\n"
           "maxDD = worst fall from a peak; risk-adj = mean/sd of per-trade bankroll returns x sqrt(trades).\n"
