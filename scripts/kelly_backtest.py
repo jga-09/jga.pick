@@ -7,7 +7,8 @@ Trades: the bot's fair-value rule (scripts/guide_test.py approach A, mid-window,
 fees), one per market, paying the ask + Kalshi's rounded-up fee + slippage, held to settlement. The SAME trades
 are sized four ways, chronologically, from the same starting bankroll:
 
-  FIXED    risk 1% of the STARTING bankroll on every trade (fixed unit)
+  FIXED    risk 1% of the STARTING bankroll ($10) on EVERY candidate, no daily stop (the raw rule)
+  FIXED-K  $10 on exactly the trades Kelly LOW chose (separates Kelly's trade SELECTION from its SIZING)
   LOW      0.25x Kelly, max 1% of the current bankroll per trade       (app/risk/kelly.py - the bot's engine)
   MEDIUM   0.50x Kelly, max 2%
   HIGH     0.75x Kelly, max 3%
@@ -157,13 +158,13 @@ class Result:
 
 
 def simulate(name: str, trades: list[Trade], start: float, fee_rate: float, mode: KellyMode | None,
-             max_risk: float = 0.0) -> Result:
+             max_risk: float = 0.0, daily_limit: bool = True) -> Result:
     r = Result(name, start, bankroll=start, peak=start, rets=[], taken=[])
     day, day_start, day_pnl = None, start, 0.0
     for t in trades:
         if t.close.date() != day:
             day, day_start, day_pnl = t.close.date(), r.bankroll, 0.0
-        daily_left = max(0.0, 0.06 * day_start + min(0.0, day_pnl))
+        daily_left = max(0.0, 0.06 * day_start + min(0.0, day_pnl)) if daily_limit else 1e12
         if mode is None:
             per = t.price / 100 + estimate_fee(1, t.price, fee_rate)
             n = int(min(0.01 * start, daily_left, r.bankroll) // per)
@@ -236,7 +237,8 @@ def main() -> int:
         print(f"\n=== {title}: {len(ts)} candidate trades ===")
         if not ts:
             continue
-        print(simulate("FIXED", ts, a.bankroll, a.fee_rate, None).line())
+        print(simulate("FIXED", ts, a.bankroll, a.fee_rate, None, daily_limit=False).line()
+              + "   <- $10 on EVERY candidate (the raw rule)")
         low = None
         for m in KellyMode:
             res = simulate(m.value.upper(), ts, a.bankroll, a.fee_rate, m, a.max_risk)
@@ -244,6 +246,8 @@ def main() -> int:
             print(res.line())
         if low and low.taken:
             k = low.taken
+            print(simulate("FIXED-K", [t for t, _, _ in k], a.bankroll, a.fee_rate, None, daily_limit=False).line()
+                  + "   <- $10 on exactly LOW's trades (selection without Kelly sizing)")
             print(f"  LOW trades: avg price {sum(t.price for t, _, _ in k) / len(k):.1f}c · avg calibrated p "
                   f"{sum(t.p for t, _, _ in k) / len(k):.1%} vs actual win {sum(t.won for t, _, _ in k) / len(k):.1%}"
                   f" · YES {sum(t.side == 'yes' for t, _, _ in k)} / NO {sum(t.side == 'no' for t, _, _ in k)}")
