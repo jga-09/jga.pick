@@ -558,7 +558,7 @@ async def test_quiet_mode_sends_no_signal_alerts(runtime, monkeypatch):
 
     sent: list[str] = []
 
-    async def notify(kind, key, text, buttons=None):
+    async def notify(kind, key, text, buttons=None, **kw):
         sent.append(kind)
 
     monkeypatch.setattr(runtime, "notify", notify)
@@ -574,7 +574,7 @@ async def test_signal_alerts_on_still_sends_flips(runtime, monkeypatch):
 
     sent: list[str] = []
 
-    async def notify(kind, key, text, buttons=None):
+    async def notify(kind, key, text, buttons=None, **kw):
         sent.append(kind)
 
     runtime.settings = runtime.settings.model_copy(update={"signal_alerts": True})

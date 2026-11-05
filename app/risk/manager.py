@@ -9,7 +9,9 @@ from typing import Any
 
 from app.kalshi.market_data import MarketSnapshot
 from app.risk.profiles import RiskLevel, RiskProfile
-from app.risk.sizing import PositionSizer
+from app.risk.kelly import KellyInput, KellyMode, KellySizing
+from app.risk.kelly import size as kelly_size
+from app.risk.sizing import PositionSizer, SizeResult
 from app.trading.fees import estimate_fee
 from app.strategy.confirm import RULES, confirm_side
 from app.strategy.quality import NO_TRADE
@@ -108,6 +110,7 @@ class RiskDecision:
     checklist: tuple[CheckItem, ...] = ()
     estimate: Any = None  # research.calibration.HistEstimate | None
     warnings: tuple[str, ...] = ()
+    kelly: Any = None  # risk.kelly.KellySizing (always computed when a probability exists; sizes only if Kelly on)
 
     @property
     def total_usd(self) -> float:
@@ -130,6 +133,16 @@ class RiskManager:
         self.stale_after_sec = stale_after_sec
         self.price_buffer_cents = price_buffer_cents
 
+    def _kelly(self, profile: RiskProfile, ctx: RiskContext, limit: float, btc: Any, estimate: Any,
+               liquidity: float | None) -> KellySizing:
+        p_point, p_low, calibrated = _kelly_probability(btc, estimate)
+        return kelly_size(KellyMode(profile.level.value), KellyInput(
+            p_point=p_point, p_low=p_low, price_cents=limit, bankroll_usd=ctx.balance_usd,
+            remaining_daily_loss_usd=max(0.0, profile.max_daily_loss_usd + min(0.0, ctx.daily_realized_pnl)),
+            remaining_open_risk_usd=max(0.0, profile.max_total_exposure_usd - ctx.open_exposure_usd),
+            calibrated=calibrated, fee_rate=self.sizer.fee_rate, max_position_usd=profile.max_position_usd,
+            liquidity_contracts=liquidity, require_calibration=ctx.mode == "live"))
+
     def evaluate(
         self,
         signal: SignalResult,
@@ -138,6 +151,7 @@ class RiskManager:
         ctx: RiskContext,
         now: datetime | None = None,
         estimate: Any = None,
+        kelly: bool | None = None,  # per-user Kelly on/off (None = the RiskManager default)
     ) -> RiskDecision:
         now = now or utcnow()
         fails: list[str] = []
@@ -300,8 +314,12 @@ class RiskManager:
             checks = _checklist(signal, snap, profile, a, estimate, ev_ok, min_q, grades, ctx)
 
         size = None
+        ks = None
+        use_kelly = self.kelly_sizing if kelly is None else kelly
         if price is not None:
             limit = min(99.0, price + self.price_buffer_cents)
+            ks = self._kelly(profile, ctx, limit, btc if btc_mode else None, estimate,
+                             liquidity if snap.orderbook is not None else None)
             # every path: a new stake can never exceed what is left of today's loss limit
             kw: dict[str, Any] = {
                 "remaining_daily_loss_usd": profile.max_daily_loss_usd + min(0.0, ctx.daily_realized_pnl)}
@@ -311,22 +329,24 @@ class RiskManager:
                 span = max(1, 100 - profile.min_btc_strength)
                 kw.update(scale=0.5 + 0.5 * min(1.0, max(0.0, (btc.strength - profile.min_btc_strength) / span)),
                           p_win=btc.edge.p_low)
-            elif self.kelly_sizing:
-                p_low = kelly_win_rate(estimate)
-                if p_low is None:
-                    fails.append("Kelly sizing: no measured edge for this setup yet (Kelly says bet 0%)")
-                else:
-                    kw.update(scale=1.0, p_win=p_low)
-            size = self.sizer.size(
-                profile,
-                price_cents=limit,  # size at the worst-case limit price
-                confidence=signal.confidence,
-                balance_usd=ctx.balance_usd,
-                open_exposure_usd=ctx.open_exposure_usd,
-                liquidity_contracts=liquidity if snap.orderbook is not None else None,
-                **kw,
-            )
-            if size.contracts < 1:
+            if use_kelly:
+                # Fractional Kelly (app/risk/kelly.py): LOW 0.25x / 1%, MEDIUM 0.5x / 2%, HIGH 0.75x / 3% of bankroll
+                if not ks.ok:
+                    fails.append(ks.reason)
+                size = SizeResult(ks.contracts, limit, ks.cost_usd, ks.fee_usd, ks.limiting_factor or "kelly")
+            else:
+                size = self.sizer.size(
+                    profile,
+                    price_cents=limit,  # size at the worst-case limit price
+                    confidence=signal.confidence,
+                    balance_usd=ctx.balance_usd,
+                    open_exposure_usd=ctx.open_exposure_usd,
+                    liquidity_contracts=liquidity if snap.orderbook is not None else None,
+                    **kw,
+                )
+            if size.contracts < 1 and use_kelly:
+                pass  # the Kelly reason is already recorded
+            elif size.contracts < 1:
                 fails.append(f"Position size is zero (limited by {size.limiting_factor})")
             elif btc_mode and btc is not None and btc.edge is not None and btc.approved:
                 # Re-check the edge with the exact (rounded-up) fee for this order size at the worst-case price.
@@ -353,10 +373,22 @@ class RiskManager:
             checklist=tuple(checks),
             estimate=estimate,
             warnings=tuple(warnings),
+            kelly=ks,
         )
         log_event(log, "RISK_EVAL", logging.DEBUG, ticker=snap.ticker, profile=lvl, approved=approved,
                   reason=decision.reason)
         return decision
+
+
+def _kelly_probability(btc: Any, estimate: Any) -> tuple[float | None, float | None, bool]:
+    """(p_point, p_low, calibrated) for the side being bought. Never a confidence score."""
+    if btc is not None:
+        if btc.edge is None:
+            return None, None, False
+        return btc.edge.p_point, btc.edge.p_low, bool(btc.calibration.calibrated)
+    if estimate is None or getattr(estimate, "p_model", None) is None:
+        return None, None, False
+    return estimate.p_model, kelly_win_rate(estimate), bool(getattr(estimate, "sufficient", False))
 
 
 def kelly_win_rate(estimate: Any) -> float | None:

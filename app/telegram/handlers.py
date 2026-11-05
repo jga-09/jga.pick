@@ -52,32 +52,33 @@ class Handlers:
             await msg.reply_text(M.unauthorized().text)
             return
         assert uid is not None
-        if cmd == "pnl" and self.router.rt.settings.pnl_image:
-            from app import DISPLAY_NAME
-            from app.telegram.pnl_dashboard import render_dashboard
+        with self.router.rt.as_user(uid):  # every command acts on THIS user's own account
+            if cmd == "pnl" and self.router.rt.settings.pnl_image:
+                from app import DISPLAY_NAME
+                from app.telegram.pnl_dashboard import render_dashboard
 
-            rt = self.router.rt
-            png = render_dashboard(rt.pnl_dashboard(rt.state.mode), DISPLAY_NAME)
-            await msg.reply_photo(png, caption="📊 Today's P&L")
-            return
-        if cmd in KEY_COMMANDS:
-            await self.keys.command(msg, uid, cmd)
-            return
-        if cmd == "help":
-            await msg.reply_text(M.help_text(), parse_mode=ParseMode.HTML)
-            return
-        if cmd in ("health", "debug"):
-            await msg.reply_text(self._health_text(debug=cmd == "debug"), parse_mode=ParseMode.HTML)
-            return
-        route = COMMAND_ROUTES.get(cmd)
-        if route is None:
-            await msg.reply_text("Unknown command. Try /help")
-            return
-        resp = await self.router.handle(uid, route)
-        if resp.screen:
-            await self.dashboard.show(msg.chat_id, uid, resp.screen, new=True)
-        elif resp.toast:
-            await msg.reply_text(resp.toast)
+                rt = self.router.rt
+                png = render_dashboard(rt.pnl_dashboard(rt.state.mode), DISPLAY_NAME)
+                await msg.reply_photo(png, caption="📊 Today's P&L")
+                return
+            if cmd in KEY_COMMANDS:
+                await self.keys.command(msg, uid, cmd)
+                return
+            if cmd == "help":
+                await msg.reply_text(M.help_text(), parse_mode=ParseMode.HTML)
+                return
+            if cmd in ("health", "debug"):
+                await msg.reply_text(self._health_text(debug=cmd == "debug"), parse_mode=ParseMode.HTML)
+                return
+            route = COMMAND_ROUTES.get(cmd)
+            if route is None:
+                await msg.reply_text("Unknown command. Try /help")
+                return
+            resp = await self.router.handle(uid, route)
+            if resp.screen:
+                await self.dashboard.show(msg.chat_id, uid, resp.screen, new=True)
+            elif resp.toast:
+                await msg.reply_text(resp.toast)
 
     def _health_text(self, debug: bool) -> str:
         rt = self.router.rt
@@ -109,7 +110,8 @@ class Handlers:
             return
         chat_id = msg.chat.id
         if resp.start_key_setup:
-            await self.keys.start(msg.chat, uid)
+            with self.router.rt.as_user(uid):
+                await self.keys.start(msg.chat, uid)
             return
         if resp.clear:
             await self.dashboard.clear(chat_id)
@@ -122,8 +124,10 @@ class Handlers:
         if msg is None:
             return
         admin = bool(user and self.router.is_admin(user.id))
-        if admin and await self.keys.message(msg, user.id):  # type: ignore[union-attr]
-            return
+        if admin:
+            with self.router.rt.as_user(user.id):  # a key sent here is stored for THIS user only
+                if await self.keys.message(msg, user.id):  # type: ignore[union-attr]
+                    return
         if await self.keys.scrub(msg):
             if admin:
                 await msg.chat.send_message("🫥 That looked like a private key, so I deleted it. "

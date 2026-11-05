@@ -23,6 +23,7 @@ class BotState:
     mode: str = "paper"  # "paper" | "live"
     focus_asset: str | None = None
     risk_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
+    kelly_sizing: bool | None = None  # per-user Kelly sizing on/off (None = KELLY_SIZING from .env)
 
     @property
     def trading_allowed(self) -> bool:
@@ -56,6 +57,7 @@ class BotState:
             mode=d.get("mode", defaults.mode) if d.get("mode") in ("paper", "live") else "paper",
             focus_asset=d.get("focus_asset"),
             risk_overrides=d.get("risk_overrides") or {},
+            kelly_sizing=d.get("kelly_sizing") if isinstance(d.get("kelly_sizing"), bool) else None,
         )
         return st
 

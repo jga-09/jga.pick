@@ -169,6 +169,7 @@ def _plain(text: str) -> str:
 class AlertManager:
     """Sends alerts to admin chats with per-key cooldowns and a global rate cap."""
 
+    supports_users = True  # runtime may target one user's alerts (their own trades / P&L / limits)
     NO_COOLDOWN = {"trade_opened", "trade_closed", "large_loss", "daily_limit", "emergency", "exit_suggest",
                    "exit_check"}
 
@@ -194,23 +195,27 @@ class AlertManager:
         self._sent.append(now)
         return True
 
-    async def alert(self, kind: str, key: str, text: str, buttons: list | None = None) -> None:
+    async def alert(self, kind: str, key: str, text: str, buttons: list | None = None,
+                    users: list[int] | None = None) -> None:
         if not self.should_send(kind, key):
             return
         screen = Screen(text, buttons or [])
-        for chat_id in self.admin_ids:
+        targets = self.admin_ids if users is None else [u for u in users if u in self.admin_ids]
+        for chat_id in targets:
             msg = await self.dashboard._send(chat_id, screen)
             if msg is not None:
                 self.dashboard.chats.setdefault(chat_id, _new_view(chat_id))
                 self.dashboard.track(chat_id, msg.message_id)
 
 
-    async def photo(self, kind: str, key: str, png: bytes, caption: str, buttons: list | None = None) -> bool:
+    async def photo(self, kind: str, key: str, png: bytes, caption: str, buttons: list | None = None,
+                    users: list[int] | None = None) -> bool:
         """Send an image with an HTML caption. Returns False if it could not be sent (caller falls back to text)."""
         if not self.should_send(kind, key):
             return True
         ok = False
-        for chat_id in self.admin_ids:
+        targets = self.admin_ids if users is None else [u for u in users if u in self.admin_ids]
+        for chat_id in targets:
             try:
                 msg = await self.bot.send_photo(chat_id=chat_id, photo=png, caption=caption[:1024],
                                                 parse_mode=ParseMode.HTML,

@@ -103,7 +103,8 @@ class CallbackRouter:
             log_event(log, "INVALID_CALLBACK", logging.WARNING, user=user_id, data=str(data)[:70])
             return Response(None, toast="Invalid or expired button", alert=True)
         try:
-            return await getattr(self, f"_on_{action}")(user_id, *args)
+            with self.rt.as_user(user_id):  # every button acts on THIS user's own account
+                return await getattr(self, f"_on_{action}")(user_id, *args)
         except InvalidCallbackError:
             log_event(log, "INVALID_CALLBACK", logging.WARNING, user=user_id, data=str(data)[:70])
             return Response(None, toast="Invalid or expired button", alert=True)
@@ -114,7 +115,10 @@ class CallbackRouter:
     async def render(self, route: str, user_id: int | None) -> Screen:
         """Re-render a refreshable route (used by the dashboard auto-refresh)."""
         resp = await self.handle(user_id, route)
-        return resp.screen or M.home(self.rt)
+        if resp.screen:
+            return resp.screen
+        with self.rt.as_user(user_id):
+            return M.home(self.rt)
 
     # ---------------------------------------------------------- navigation
     async def _on_home(self, uid: int) -> Response:

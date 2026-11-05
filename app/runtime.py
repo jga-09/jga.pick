@@ -136,7 +136,7 @@ class BotRuntime:
         self.btc_cfg = ModelConfig(sigma_window_min=settings.btc_sigma_window_min, basis_bps=settings.btc_basis_bps)
         self.calibration: CalibrationReport | None = None  # BTC's (or the first coin's), for the dashboard
         self.calibrations: dict[str, CalibrationReport] = {}
-        self.reconcile_report: ReconcileReport | None = None
+        self._reconcile: dict[int, ReconcileReport] = {}
         self.gold_provider: Any = None  # PythGoldProvider when GOLD_ENABLED + GOLD_PYTH_FEED_ID (research only)
         self.gold: GoldStatus | None = None
         self.model = self._build_model()
@@ -246,6 +246,21 @@ class BotRuntime:
     def current_user(self) -> int:
         return self.account().user_id
 
+    @property
+    def reconcile_report(self) -> ReconcileReport | None:
+        return self._reconcile.get(self.current_user)
+
+    @reconcile_report.setter
+    def reconcile_report(self, report: ReconcileReport | None) -> None:
+        if report is None:
+            self._reconcile.pop(self.current_user, None)
+        else:
+            self._reconcile[self.current_user] = report
+
+    def kelly_on(self) -> bool:
+        flag = self.state.kelly_sizing
+        return self.risk.kelly_sizing if flag is None else bool(flag)
+
     # ------------------------------------------------------------ properties
     @property
     def repo(self) -> AccountRepo:
@@ -294,7 +309,12 @@ class BotRuntime:
 
     def mode_permitted(self, mode: str | None = None) -> bool:
         mode = mode or self.state.mode
-        return mode == "paper" or (self.settings.live_allowed and self.live is not None)
+        if mode == "paper":
+            return True
+        if not (self.settings.live_allowed and self.live is not None):
+            return False
+        # every user other than the owner trades live only with their OWN verified key
+        return self.account().is_owner or getattr(self.trading_client, "signer", None) is not None
 
     # ------------------------------------------------------- Kalshi API key
     @property
@@ -401,16 +421,25 @@ class BotRuntime:
         try:
             data = self.pnl_dashboard(mode, title="SESSION SUMMARY" if title.startswith("SESSION") else "P&L OVERVIEW")
             png = await asyncio.to_thread(render_dashboard, data, DISPLAY_NAME)
+            uid = self._current.get()
+            if uid is not None and getattr(self.notifier, "supports_users", False):
+                return await self.notifier.photo(kind, f"{uid}:{key}", png, caption, users=[uid])
             return await self.notifier.photo(kind, key, png, caption)
         except Exception:
             log.exception("PNL_IMAGE_FAILED kind=%s", kind)
             return False
 
-    async def notify(self, kind: str, key: str, text: str, buttons: list | None = None) -> None:
+    async def notify(self, kind: str, key: str, text: str, buttons: list | None = None, *,
+                     everyone: bool = False) -> None:
+        """Alert the user this task acts for (their trades, P&L, limits) - or every user for bot-wide events."""
         if self.notifier is None:
             return
+        uid = None if everyone else self._current.get()
         try:
-            await self.notifier.alert(kind, key, text, buttons)
+            if uid is not None and getattr(self.notifier, "supports_users", False):
+                await self.notifier.alert(kind, f"{uid}:{key}", text, buttons, users=[uid])
+            else:
+                await self.notifier.alert(kind, key, text, buttons)
         except Exception:
             log.exception("ALERT_FAILED kind=%s", kind)
 
@@ -424,12 +453,25 @@ class BotRuntime:
         self._spawn(self._discovery_loop(), "discovery")
         self._spawn(self._poll_loop(), "poll")
         self._spawn(self._maintenance_loop(), "maintenance")
-        if self.live is not None:
-            self._spawn(self.reconcile_live(), "reconcile")  # crash recovery: resolve leftover live orders
+        if self.settings.live_allowed:
+            self._spawn(self._reconcile_all(), "reconcile")  # crash recovery: resolve leftover live orders
         signer = getattr(self.client, "signer", None)
         if self.settings.use_websocket and signer is not None and not self.fixture_mode:
             self.ws = KalshiWebSocket(self.settings.ws_url, signer, self._on_ws)
             self._spawn(self.ws.run(), "websocket")
+
+    async def _reconcile_all(self) -> None:
+        for acct in self.all_accounts():
+            with self.as_user(acct.user_id):
+                try:
+                    await self.reconcile_live()
+                except Exception as exc:
+                    log.error("RECONCILE_ERROR user=%s error=%r", acct.user_id, exc, exc_info=exc)
+
+    def _all_auto_trade_off(self) -> None:
+        for acct in self.all_accounts():
+            if acct.store.state.auto_trade:
+                acct.store.update(auto_trade=False)
 
     def _spawn(self, coro: Awaitable[Any], name: str) -> None:
         task = asyncio.create_task(coro, name=name)  # type: ignore[arg-type]
@@ -446,6 +488,7 @@ class BotRuntime:
 
     async def stop(self) -> None:
         self.store.update(running=False, auto_trade=False)
+        self._all_auto_trade_off()  # the scanner is shared: stopping it stops every user's auto trade
         if self.ws:
             self.ws.stop()
         for t in self._tasks:
@@ -477,6 +520,7 @@ class BotRuntime:
 
     async def emergency_stop(self, by: int | None = None) -> None:
         self.store.update(emergency_stop=True, auto_trade=False)
+        self._all_auto_trade_off()  # EMERGENCY STOP is bot-wide: every user's auto trade goes off
         self.repo.add_event("EMERGENCY_STOP", f"by={by}", "CRITICAL")
         log_event(log, "EMERGENCY_STOP", logging.CRITICAL, by=by)
 
@@ -700,7 +744,8 @@ class BotRuntime:
     def research(self, key: str) -> Any:
         from app.telegram.analytics_views import compute_research
 
-        return self._research.get(key, lambda: compute_research(self, key))
+        # trade analytics read the user's own trades, so each user has their own cache entry
+        return self._research.get(f"{self.current_user}:{key}", lambda: compute_research(self, key))
 
     def estimate_for(self, sig: SignalResult, snap: MarketSnapshot) -> HistEstimate | None:
         a = sig.analysis
@@ -763,7 +808,8 @@ class BotRuntime:
             mode_permitted=self.mode_permitted(),
         )
         ctx = replace(ctx, adaptive_mode=self.adaptive.mode, adaptive_reason=self.adaptive.reason)
-        return self.risk.evaluate(sig, snap, self.profile(), ctx, now, estimate=self.estimate_for(sig, snap))
+        return self.risk.evaluate(sig, snap, self.profile(), ctx, now, estimate=self.estimate_for(sig, snap),
+                                  kelly=self.state.kelly_sizing)  # None = the KELLY_SIZING default
 
     def make_ticket(self, sig: SignalResult, decision: RiskDecision, snap: MarketSnapshot,
                     origin: str = "manual") -> TradeTicket:
@@ -988,23 +1034,34 @@ class BotRuntime:
 
         flip = self.engine.detect_flip(sig)
         if flip and self.settings.signal_alerts:
-            await self.notify("flip", f"flip:{snap.ticker}", messages.flip_alert(flip))
+            await self.notify("flip", f"flip:{snap.ticker}", messages.flip_alert(flip), everyone=True)
+        # One shared signal; every user's own risk check, sizing, exits and auto trade.
+        for acct in self.all_accounts():
+            with self.as_user(acct.user_id):
+                try:
+                    await self._process_for_user(sig, snap)
+                except Exception as exc:  # one user's problem must never stop the others
+                    log.error("USER_PROCESS_ERROR user=%s ticker=%s error=%r", acct.user_id, snap.ticker, exc,
+                              exc_info=exc)
+        return sig
+
+    async def _process_for_user(self, sig: SignalResult, snap: MarketSnapshot) -> None:
         decision = self.check_risk(sig, snap)
+        uid = self.current_user
         strong = (decision.approved and sig.grade in ("A+", "A")
                   and sig.confidence >= self.settings.strong_signal_alert_min_confidence)
         quiet = not self.settings.signal_alerts and self.state.auto_trade
-        if strong and not quiet and self._strong.get(snap.ticker) != sig.direction.value:
-            self._strong[snap.ticker] = sig.direction.value
+        if strong and not quiet and self._strong.get(f"{uid}:{snap.ticker}") != sig.direction.value:
+            self._strong[f"{uid}:{snap.ticker}"] = sig.direction.value
             text, buttons = messages.strong_signal_alert(sig, snap, decision, self.state)
             await self.notify("strong_signal", f"strong:{snap.ticker}:{sig.direction.value}", text, buttons)
         elif not strong and (sig.grade not in ("A+", "A")
                              or sig.confidence < self.settings.strong_signal_alert_min_confidence - 5):
-            self._strong.pop(snap.ticker, None)  # hysteresis: re-arm only after it clearly weakens
+            self._strong.pop(f"{uid}:{snap.ticker}", None)  # hysteresis: re-arm only after it clearly weakens
         if self.settings.early_exit or self.settings.take_profit_cents or self.settings.take_profit_price_cents:
             await self._manage_exits(sig, snap)
         if self.state.auto_trade and decision.approved:
             await self._auto_trade(sig, snap, decision)
-        return sig
 
     # ------------------------------------------------------------ early exits
     def exit_reason(self, pos: Position, sig: SignalResult, snap: MarketSnapshot) -> str | None:
@@ -1065,7 +1122,9 @@ class BotRuntime:
 
     @property
     def _exit_stats_path(self) -> Path:
-        return self.settings.kalshi_key_dir.parent / "early_exit_stats.json"
+        acct = self.account()
+        name = "early_exit_stats.json" if acct.is_owner else f"early_exit_stats_{acct.user_id}.json"
+        return self.settings.kalshi_key_dir.parent / name
 
     def early_exit_stats(self) -> dict[str, float]:
         try:
@@ -1089,26 +1148,36 @@ class BotRuntime:
             if result not in ("yes", "no"):
                 continue
             del self._early_exits[ticker]
-            st = self.early_exit_stats()
-            for pos in plist:
-                hold = round(pos.contracts * (100 if result == pos.side else 0) / 100 - pos.cost - pos.entry_fee, 2)
-                saved = round((pos.realized_pnl or 0) - hold, 2)
-                if "take-profit" in (pos.close_reason or ""):  # separate scorecard for take-profit exits
-                    st["tp_exits"] = st.get("tp_exits", 0) + 1
-                    st["tp_saved"] = round(st.get("tp_saved", 0.0) + saved, 2)
-                    key = "tp_helped" if saved > 0 else "tp_hurt"
-                    st[key] = st.get(key, 0) + (1 if saved != 0 else 0)
-                st["exits"] += 1
-                st["saved"] = round(st["saved"] + saved, 2)
-                st["helped" if saved > 0 else "hurt"] += 1 if saved != 0 else 0
-                scored += 1
-                await self.notify("exit_check", f"exitcheck:{pos.id}",
-                                  messages.exit_check(pos, self._card_meta(pos)[0], result, hold, saved, st))
-            try:
-                self._exit_stats_path.parent.mkdir(parents=True, exist_ok=True)
-                self._exit_stats_path.write_text(json.dumps(st))
-            except OSError:
-                log.warning("EARLY_EXIT_STATS_SAVE_FAILED")
+            for uid in sorted({p.account_id or self.owner for p in plist}):
+                if not self.allowed_user(uid):
+                    continue  # user removed from TELEGRAM_ADMIN_IDS: nothing to tell them
+                with self.as_user(uid):  # each user's scorecard and alerts are their own
+                    scored += await self._score_exits([p for p in plist if (p.account_id or self.owner) == uid],
+                                                      result)
+        return scored
+
+    async def _score_exits(self, plist: list[Position], result: str) -> int:
+        st = self.early_exit_stats()
+        scored = 0
+        for pos in plist:
+            hold = round(pos.contracts * (100 if result == pos.side else 0) / 100 - pos.cost - pos.entry_fee, 2)
+            saved = round((pos.realized_pnl or 0) - hold, 2)
+            if "take-profit" in (pos.close_reason or ""):  # separate scorecard for take-profit exits
+                st["tp_exits"] = st.get("tp_exits", 0) + 1
+                st["tp_saved"] = round(st.get("tp_saved", 0.0) + saved, 2)
+                key = "tp_helped" if saved > 0 else "tp_hurt"
+                st[key] = st.get(key, 0) + (1 if saved != 0 else 0)
+            st["exits"] += 1
+            st["saved"] = round(st["saved"] + saved, 2)
+            st["helped" if saved > 0 else "hurt"] += 1 if saved != 0 else 0
+            scored += 1
+            await self.notify("exit_check", f"exitcheck:{pos.id}",
+                              messages.exit_check(pos, self._card_meta(pos)[0], result, hold, saved, st))
+        try:
+            self._exit_stats_path.parent.mkdir(parents=True, exist_ok=True)
+            self._exit_stats_path.write_text(json.dumps(st))
+        except OSError:
+            log.warning("EARLY_EXIT_STATS_SAVE_FAILED")
         return scored
 
     async def _auto_trade(self, sig: SignalResult, snap: MarketSnapshot, decision: RiskDecision) -> None:
@@ -1141,16 +1210,17 @@ class BotRuntime:
 
     async def reconcile_live(self, periodic: bool = False, now: datetime | None = None) -> ReconcileReport | None:
         """Compare the bot's live positions/orders with Kalshi's. Mismatched markets are blocked and reported."""
-        if self.live is None or getattr(self.client, "signer", None) is None:
+        client = self.trading_client  # THIS user's key: their orders and positions only
+        if self.live is None or getattr(client, "signer", None) is None:
             return None
         now = now or utcnow()
         if periodic and self.reconcile_report and (now - self.reconcile_report.at).total_seconds() < 300:
             return self.reconcile_report
         report = ReconcileReport(at=now)
         try:
-            report.recovered, blocked = await recover_orders(self.client, self.repo)
+            report.recovered, blocked = await recover_orders(client, self.repo)
             report.mismatches = compare_positions(self.portfolio.open_positions("live"),
-                                                  await self.client.get_market_positions())
+                                                  await client.get_market_positions())
         except KalshiError as exc:
             report.ok, report.error = False, f"could not reach Kalshi: {exc}"
             self.reconcile_report = report
@@ -1200,9 +1270,10 @@ class BotRuntime:
         start = (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
         end = start + timedelta(days=1)
         day = start.strftime("%Y-%m-%d")
-        if self.repo.get_setting("daily_recap_last") == day or self.notifier is None:
+        key = "daily_recap_last" if self.account().is_owner else f"daily_recap_last:{self.current_user}"
+        if self.repo.get_setting(key) == day or self.notifier is None:
             return None
-        self.repo.set_setting("daily_recap_last", day)  # mark first: a send failure must never cause spam
+        self.repo.set_setting(key, day)  # mark first: a send failure must never cause spam
         mode = self.state.mode
         closed = [p for p in self.repo.closed_positions(mode=mode, since=start, limit=10_000)
                   if p.closed_at is not None and p.closed_at < end]
@@ -1222,18 +1293,29 @@ class BotRuntime:
         return self.gold
 
     async def settle_positions(self, now: datetime | None = None) -> list[Position]:
-        """Settle positions whose market has closed and has a published result."""
+        """Settle every user's positions whose market has closed and has a published result."""
         now = now or utcnow()
+        results: dict[str, str | None] = {}  # one Kalshi lookup per market, however many users hold it
+        settled: list[Position] = []
+        for acct in self.all_accounts():
+            with self.as_user(acct.user_id):
+                settled += await self._settle_user(now, results)
+        await self.score_early_exits(now)
+        return settled
+
+    async def _settle_user(self, now: datetime, results: dict[str, str | None]) -> list[Position]:
         settled = []
         for pos in list(self.portfolio.open_positions()):
             if pos.close_time is None or now < pos.close_time + timedelta(seconds=5):
                 continue
-            try:
-                raw = await self.client.get_market(pos.ticker)
-            except KalshiError as exc:
-                log_event(log, "SETTLEMENT_CHECK_FAILED", logging.WARNING, ticker=pos.ticker, error=exc)
-                continue
-            result = str(raw.get("result") or "")
+            if pos.ticker not in results:
+                try:
+                    raw = await self.client.get_market(pos.ticker)
+                except KalshiError as exc:
+                    log_event(log, "SETTLEMENT_CHECK_FAILED", logging.WARNING, ticker=pos.ticker, error=exc)
+                    continue
+                results[pos.ticker] = str(raw.get("result") or "")
+            result = results[pos.ticker] or ""
             if result not in ("yes", "no"):
                 continue  # not determined yet - never guess an outcome
             async with self.executor.lock_for(pos.ticker):  # no race with a manual/early exit
@@ -1246,7 +1328,6 @@ class BotRuntime:
                                          f"settled {result.upper()}", action="SETTLE")
             settled.append(pos)
             await self._after_close(pos)
-        await self.score_early_exits(now)
         return settled
 
     async def _maintenance_loop(self) -> None:
@@ -1257,9 +1338,16 @@ class BotRuntime:
                 if labelled or time.time() - self._model_built > self.settings.model_refresh_sec:
                     self.refresh_model()
                 self.update_adaptive()
-                if self.state.mode == "live" and self.live is not None:
-                    bal = await self.client.get_balance()
-                    self.portfolio.live_balance = float(bal.get("balance", 0)) / 100
+                for acct in self.all_accounts():  # each user's own Kalshi balance, with their own key
+                    with self.as_user(acct.user_id):
+                        if self.state.mode == "live" and self.live is not None \
+                                and getattr(self.trading_client, "signer", None) is not None:
+                            try:
+                                bal = await self.trading_client.get_balance()
+                                self.portfolio.live_balance = float(bal.get("balance", 0)) / 100
+                            except KalshiError as exc:
+                                log_event(log, "LIVE_BALANCE_FAILED", logging.WARNING, user=acct.user_id,
+                                          error=exc)
                 if time.time() - self._last_purge > 3600:
                     self._last_purge = time.time()
                     purged = self.repo.purge(self.settings.snapshot_retention_days,
@@ -1273,20 +1361,24 @@ class BotRuntime:
                 self.last_error = f"maintenance: {exc!r}"
                 log.error("MAINTENANCE_ERROR error=%r", exc, exc_info=exc)
             if self.settings.daily_recap:
-                try:
-                    await self.send_daily_recap()
-                except Exception as exc:
-                    log.error("DAILY_RECAP_ERROR error=%r", exc, exc_info=exc)
+                for acct in self.all_accounts():
+                    with self.as_user(acct.user_id):
+                        try:
+                            await self.send_daily_recap()
+                        except Exception as exc:
+                            log.error("DAILY_RECAP_ERROR user=%s error=%r", acct.user_id, exc, exc_info=exc)
             if self.settings.gold_enabled:
                 try:
                     await self.refresh_gold()
                 except Exception as exc:
                     log.error("GOLD_STATUS_ERROR error=%r", exc, exc_info=exc)
-            if self.state.mode == "live" and self.live is not None:
-                try:
-                    await self.reconcile_live(periodic=True)
-                except Exception as exc:
-                    log.error("RECONCILE_ERROR error=%r", exc, exc_info=exc)
+            for acct in self.all_accounts():
+                with self.as_user(acct.user_id):
+                    if self.state.mode == "live" and self.live is not None:
+                        try:
+                            await self.reconcile_live(periodic=True)
+                        except Exception as exc:
+                            log.error("RECONCILE_ERROR user=%s error=%r", acct.user_id, exc, exc_info=exc)
             await asyncio.sleep(15)
 
     async def shutdown(self) -> None:
