@@ -114,9 +114,18 @@ def rule_a(m, q, sp, lo_min, hi_min, edge, slip):
 CHOSEN = "A fair value, MID-window, edge>=6c"  # the rule the bot forward-tests (FAIR_VALUE_PURE)
 
 
+PRICE_MOVES: dict[str, dict[str, float]] = {}  # asset -> month -> % change of the coin (Coinbase)
+
+
 def run(asset: str, cache: Path, slip: float, holdout_days: int, totals: dict, before: datetime | None = None,
         chosen: dict | None = None) -> None:
     bars = load_crypto_bars(cache, asset)
+    first_last: dict[str, list[float]] = {}
+    for b in bars:
+        if before is None or b.end < before.timestamp():
+            fl = first_last.setdefault(f"{datetime.fromtimestamp(b.end, UTC):%Y-%m}", [b.close, b.close])
+            fl[1] = b.close
+    PRICE_MOVES[asset] = {k: v[1] / v[0] - 1 for k, v in first_last.items() if v[0] > 0}
     markets = [m for m in load_markets(cache, f"KX{asset}15M-") if m["result"] in ("yes", "no") and m["strike"]]
     if before is not None:
         markets = [m for m in markets if m["close"] < before]  # only markets the rule was NOT chosen on
@@ -146,7 +155,7 @@ def run(asset: str, cache: Path, slip: float, holdout_days: int, totals: dict, b
             (hold if m["close"] >= hold_from else dev).append((r, r > 0))
             totals.setdefault(name, ([], []))[0 if m["close"] < hold_from else 1].append(r)
             if name == CHOSEN and chosen is not None:
-                chosen.setdefault(asset, []).append((m["close"], r))
+                chosen.setdefault(asset, []).append((m["close"], r, side))
         print(f"  {name}")
         for label, xs in (("earlier", dev), ("last 7d", hold)):
             print("    " + line(label, [x[0] for x in xs]))
@@ -181,17 +190,31 @@ def main() -> int:
         print(f"\n=== FRESH-PERIOD VERDICT for the bot's rule ({CHOSEN}), markets before {a.before} ===")
         print("    same rules as scripts/forward_report.py: PASS = 150+ trades and the whole 95% range above 0")
         for asset, rs in chosen.items():
-            ps = [r for _, r in rs]
+            ps = [r for _, r, _ in rs]
             ci = boot(ps)
             ok = len(ps) >= 150 and ci is not None and ci[0] > 0
             bad = ci is not None and ci[1] < 0
             word = "✅ PASS" if ok else "❌ FAIL" if bad else "⏳ INCONCLUSIVE"
             print(f"  {asset:<5} {line('all', ps)}  {word}")
             months: dict[str, list[float]] = {}
-            for when, r in rs:
+            for when, r, _ in rs:
                 months.setdefault(f"{when:%Y-%m}", []).append(r)
             print("        by month: " + " · ".join(f"{k} {sum(v) / len(v):+.1f}c (n={len(v)})"
                                                     for k, v in sorted(months.items())))
+            for side in ("yes", "no"):
+                sp_ = [r for _, r, sd in rs if sd == side]
+                print(f"        {'YES (UP) ' if side == 'yes' else 'NO (DOWN)'} {line('', sp_)}")
+                bym: dict[str, list[float]] = {}
+                for when, r, sd in rs:
+                    if sd == side:
+                        bym.setdefault(f"{when:%Y-%m}", []).append(r)
+                print("          by month: " + " · ".join(f"{k} {sum(v) / len(v):+.1f}c (n={len(v)})"
+                                                      for k, v in sorted(bym.items())))
+            moves = PRICE_MOVES.get(asset, {})
+            if moves:
+                print("        coin price change by month: " + " · ".join(
+                    f"{k} {v:+.0%}" for k, v in sorted(moves.items())))
+                print("        (if NO wins only in falling months and YES only in rising ones, it is trend, not an edge)")
     if totals:
         print("\n=== ALL COINS ===")
         for name, (dev, hold) in totals.items():
