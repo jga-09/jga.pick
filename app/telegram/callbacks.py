@@ -38,7 +38,7 @@ ACTIONS: dict[str, tuple[int, ...]] = {
     "btc": (0,), "bwhy": (1,), "banl": (0,), "bcal": (0,), "bt": (0,),
     "kacct": (0,), "keyset": (0,), "keydel": (0,),
     "clear": (0,), "clearok": (0,), "tidy": (0,), "estop": (0,), "estopok": (0,), "ereset": (0,), "eresetok": (0,), "pnl": (0,),
-    "asset": (1,), "orders": (0,), "models": (0,),
+    "asset": (1,), "orders": (0,), "models": (0,), "kelly": (0,), "kon": (1,),
 }
 CARD_ASSETS = ("BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "GOLD")
 
@@ -300,6 +300,21 @@ class CallbackRouter:
     async def _on_eresetok(self, uid: int) -> Response:
         self.rt.reset_emergency(by=uid)
         return Response(M.home(self.rt), toast="🔓 Emergency stop reset")
+
+    # -------------------------------------------------------------- kelly
+    async def _on_kelly(self, uid: int) -> Response:
+        from app.telegram.kelly_views import kelly_screen
+
+        return Response(kelly_screen(self.rt))
+
+    async def _on_kon(self, uid: int, flag: str) -> Response:
+        from app.telegram.kelly_views import kelly_screen
+
+        if flag not in ("0", "1"):
+            raise InvalidCallbackError("bad kelly flag")
+        self.rt.store.update(kelly_sizing=flag == "1")  # this user only
+        self.rt.repo.add_event("KELLY_CHANGED", f"user={uid} on={flag == '1'}")
+        return Response(kelly_screen(self.rt), toast=f"Kelly sizing {'ON' if flag == '1' else 'OFF'}")
 
     # --------------------------------------------------------------- risk
     async def _on_risk(self, uid: int) -> Response:

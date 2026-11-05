@@ -30,6 +30,7 @@ COMMANDS = [
     ("gold", "Gold research status (never traded)"), ("today", "Today's performance"), ("week", "Last 7 days"),
     ("month", "Last 30 days"), ("performance", "All-time performance"), ("orders", "Live orders & Kalshi check"),
     ("models", "Model comparison"), ("kill", "Emergency stop (kill switch)"),
+    ("kelly", "Your Kelly sizing: bankroll, mode, recommended size"),
 ]
 
 

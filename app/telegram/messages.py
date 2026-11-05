@@ -342,10 +342,15 @@ def profile_params(p: RiskProfile, btc: bool = False) -> list[str]:
 
 def risk_menu(rt: BotRuntime) -> Screen:
     st = rt.state
-    lines = ["🛡 <b>TRADING RISK</b>", "", "Current:", st.risk_level.badge, "", "Select:", "", SEP, "",
+    from app.risk.kelly import KellyMode
+
+    km = KellyMode(st.risk_level.value)
+    lines = ["🛡 <b>TRADING RISK</b> (your account only)", "", "Current:", st.risk_level.badge,
+             f"Kelly: {km.multiplier:g}x, max {km.position_cap:.0%} of bankroll per trade · "
+             f"{'ON' if rt.kelly_on() else 'off'}", "", "Select:", "", SEP, "",
              "CURRENT PARAMETERS", "", *profile_params(rt.profile(), rt.btc_mode)]
     buttons = [[(lvl.badge, f"rset:{lvl.value}")] for lvl in RiskLevel]
-    buttons += [[("⚙️ Customize", "rcust"), BACK]]
+    buttons += [[("📐 Kelly", "kelly"), ("⚙️ Customize", "rcust"), BACK]]
     return Screen("\n".join(lines), buttons, route="risk")
 
 
@@ -357,10 +362,17 @@ RISK_EFFECTS = {
 }
 
 
+def _kelly_label(level: RiskLevel) -> str:
+    from app.risk.kelly import KellyMode
+
+    return KellyMode(level.value).label
+
+
 def risk_confirm(rt: BotRuntime, new: RiskLevel) -> Screen:
     cur = rt.state.risk_level
     lines = ["⚠️ <b>CHANGE RISK LEVEL</b>", "", "Current:", cur.badge, "", "New:", new.badge, "",
-             f"{new.title} allows:", *[f"• {e}" for e in RISK_EFFECTS[new]], "",
+             f"{new.title} allows:", *[f"• {e}" for e in RISK_EFFECTS[new]],
+             f"• Kelly sizing: {_kelly_label(new)}", "",
              *profile_params(rt.profile(new), rt.btc_mode), "",
              "<i>Risk level does not change paper/live mode and never enables real-money trading.</i>"]
     return Screen("\n".join(lines), [[("✅ Confirm", f"rok:{new.value}"), ("❌ Cancel", "risk")]], route="risk")

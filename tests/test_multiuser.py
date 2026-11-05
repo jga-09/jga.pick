@@ -184,3 +184,36 @@ def test_migration_adds_account_columns_to_an_old_database(tmp_path):
     repo.adopt_legacy(OWNER)
     assert AccountRepo(repo, OWNER).open_positions()[0].account_id == OWNER
     assert repo.daily("paper", "2026-11-01", account=OWNER).realized_pnl == 1.5
+
+
+async def test_kelly_screen_and_toggle_are_per_user(rt2):
+    from app.telegram.callbacks import CallbackRouter
+
+    router = CallbackRouter(rt2, rt2.settings.admin_ids)
+    info = make_info()
+    with rt2.as_user(OTHER):
+        rt2.store.update(running=True, risk_level=RiskLevel.MEDIUM)
+    feed_history(rt2, info, "up")
+    resp = await router.handle(OTHER, "kelly")
+    text_ = resp.screen.text
+    assert "KELLY SIZING" in text_ and "Medium (0.5x Kelly, max 2% per trade)" in text_
+    assert "Bankroll (paper): <b>$1,000.00</b>" in text_ and "Remaining daily risk" in text_
+    resp = await router.handle(OTHER, "kon:1")
+    assert "Kelly sizing ON" in (resp.toast or "")
+    with rt2.as_user(OTHER):
+        assert rt2.kelly_on()
+    with rt2.as_user(OWNER):
+        assert rt2.kelly_on() == rt2.settings.kelly_sizing  # the owner's choice is untouched
+    bad = await router.handle(OTHER, "kon:7")
+    assert bad.screen is None and "Invalid" in (bad.toast or "")
+    assert (await router.handle(STRANGER, "kelly")).toast == "⛔ Unauthorized"
+
+
+def test_kelly_recommendation_is_on_every_decision(rt2):
+    info = make_info()
+    with rt2.as_user(OWNER):
+        rt2.store.update(running=True, risk_level=RiskLevel.HIGH)
+        sig = feed_history(rt2, info, "up")
+        d = rt2.check_risk(sig, rt2.market_data.latest[info.ticker])
+    assert d.kelly is not None and d.kelly.mode.value == "high"
+    assert d.kelly.contracts == 0 or d.kelly.max_loss_usd <= 1000 * 0.03 + 1e-9

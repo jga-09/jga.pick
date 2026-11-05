@@ -25,6 +25,7 @@ COMMAND_ROUTES = {
     # upgrade: per-asset cards, periods, orders, models, kill switch
     "eth": "asset:ETH", "sol": "asset:SOL", "xrp": "asset:XRP", "doge": "asset:DOGE", "bnb": "asset:BNB", "gold": "asset:GOLD", "today": "hist:today", "week": "hist:7d",
     "month": "hist:30d", "performance": "hist:all", "orders": "orders", "models": "models", "kill": "estop",
+    "kelly": "kelly",
 }
 
 
