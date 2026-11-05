@@ -65,9 +65,12 @@ def kelly_screen(rt: BotRuntime, limit: int = 3) -> Screen:
         lines += ["", "No market data yet - start the bot and check again."]
     lines += ["", "<i>Kelly sizes by the estimated edge. With no proven edge it says 0% - that is the point. "
               "Never full Kelly; the mode cap is a hard limit.</i>"]
+    modes = [(f"{'• ' if m == mode else ''}{m.value.title()} {m.multiplier:g}x", f"rset:{m.value}")
+             for m in KellyMode]
     buttons = [
         [("🔴 Kelly OFF" if on else "🟢 Kelly ON", f"kon:{0 if on else 1}")],
-        [(f"{'• ' if m == mode else ''}{m.value.title()} {m.multiplier:g}x", f"rset:{m.value}") for m in KellyMode],
-        [("🔄 Refresh", "kelly"), ("🏠 Home", "home")],
+        modes[:2],
+        [modes[2], ("🔄 Refresh", "kelly")],
+        [("🏠 Home", "home")],
     ]
     return Screen("\n".join(lines), buttons, route="kelly", refreshable=True)

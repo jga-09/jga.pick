@@ -109,7 +109,7 @@ async def test_all_screens_render(runtime, router):
     for route in ("home", "status", "signals", f"mkt:{info.ticker}", f"det:{info.ticker}", "trades:0", "pos",
                   "risk", "rcust", "hist:7d", "strat", "ind", "cfg", "assets", "possz", "auto", "mode",
                   "estop", "pnl", f"why:{info.ticker}", f"chk:{info.ticker}", "anl", "anld", "cal", "loss",
-                  "wins", "exp", "filt", "feat"):
+                  "wins", "exp", "filt", "feat", "kelly"):
         resp = await router.handle(ADMIN_ID, route)
         assert resp.screen is not None and resp.screen.text, route
         assert not _bad_html(resp.screen.text), (route, resp.screen.text)

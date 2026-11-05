@@ -350,7 +350,7 @@ def risk_menu(rt: BotRuntime) -> Screen:
              f"{'ON' if rt.kelly_on() else 'off'}", "", "Select:", "", SEP, "",
              "CURRENT PARAMETERS", "", *profile_params(rt.profile(), rt.btc_mode)]
     buttons = [[(lvl.badge, f"rset:{lvl.value}")] for lvl in RiskLevel]
-    buttons += [[("📐 Kelly", "kelly"), ("⚙️ Customize", "rcust"), BACK]]
+    buttons += [[("📐 Kelly", "kelly"), ("⚙️ Customize", "rcust")], [BACK]]
     return Screen("\n".join(lines), buttons, route="risk")
 
 
