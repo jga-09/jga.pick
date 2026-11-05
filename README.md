@@ -369,6 +369,30 @@ Pass/fail rules, fixed before the test: **PASS** = 14+ days, 150+ markets and a 
 **FAIL** = a range entirely below zero, or 28+ days without a positive average. Check progress with
 `docker exec kalshi-directional-bot python scripts/forward_report.py`.
 
+## 15c-4. Multi-user accounts and fractional Kelly sizing
+
+**Accounts.** Every id in `TELEGRAM_ADMIN_IDS` gets a separate account: paper bankroll, positions, trades, daily
+P&L and limits, risk level / Kelly mode, auto trade, paper/live mode and their **own Kalshi API key** (`/setkey`,
+stored under `data/kalshi/user_<id>/`, mode 600). The first id is the owner: it keeps all data and the key from
+before multi-user support (an existing database is migrated on start, nothing is lost). One shared scanner makes
+the signals; each user's own risk check, sizing, exits, auto trade, settlement and alerts run in their account.
+Bot start/stop, pause and EMERGENCY STOP are bot-wide (stop / EMERGENCY STOP turn every user's auto trade off).
+A user can only trade live with their own verified key, and every live order still needs their confirmation.
+
+**Kelly** (`app/risk/kelly.py`, `/kelly`). `b = (1-c)/c`, full Kelly `f = (p*b - (1-p))/b`; sizing uses the smaller
+fee-inclusive Kelly. Mode = risk level: LOW 0.25x / max 1% of bankroll per position, MEDIUM 0.5x / 2%, HIGH 0.75x /
+3% (hard caps). Budget = min(bankroll x fractional Kelly, bankroll x cap, remaining daily loss, remaining open
+risk, profile max), converted to contracts with the exact rounded-up fee and rounded down; one contract over budget
+= no trade. `p` is the strategy's probability (never a confidence score), lowered to the cautious end of its
+uncertainty range; at or below the fee-inclusive break-even = 0% = no trade. Live requires the coin's probability
+to be calibrated on its own settled results. Sizing is recomputed at the fresh price right before every order.
+Kelly is on per user (`/kelly` -> Kelly ON) or for everyone with `KELLY_SIZING=true`.
+
+**Backtest.** `python scripts/kelly_backtest.py` (default HYPE,DOGE): the same fair-value trades sized FIXED (1%
+of the starting bankroll) vs Kelly LOW/MEDIUM/HIGH, with walk-forward calibration, on the earlier days and on the
+untouched last 7 days: bankroll growth, max drawdown, ROI, win rate, average risk, longest losing streak and a
+risk-adjusted score. Sizing cannot create an edge; nothing here claims Kelly is profitable.
+
 ## 15d. Advanced upgrade: per-asset models, Gold research, live-order safety
 
 See `docs/AUDIT.md` for everything found and fixed. In short:

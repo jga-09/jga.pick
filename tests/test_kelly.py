@@ -74,3 +74,41 @@ def test_fractional_kelly_matches_fee_inclusive_kelly():
     assert s.fee_kelly == pytest.approx((0.60 - c_fee) / (1 - c_fee))
     assert s.fractional_kelly == pytest.approx(s.fee_kelly * 0.5)
     assert s.fee_kelly < s.full_kelly  # fees always shrink Kelly
+
+
+def _kb():
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    spec = importlib.util.spec_from_file_location("kelly_backtest", Path(__file__).parents[1] / "scripts" /
+                                                  "kelly_backtest.py")
+    m = importlib.util.module_from_spec(spec)
+    sys.modules["kelly_backtest"] = m  # dataclasses need their module registered
+    spec.loader.exec_module(m)
+    return m
+
+
+def test_backtest_calibration_never_looks_ahead():
+    from datetime import UTC, datetime, timedelta
+
+    kb = _kb()
+    d0 = datetime(2026, 10, 1, 12, tzinfo=UTC)
+    day1 = [kb.Trade(d0 + timedelta(minutes=15 * i), "HYPE", "yes", 40, False, 0.55, 0.50) for i in range(40)]
+    day2 = [kb.Trade(d0 + timedelta(days=1), "HYPE", "yes", 40, True, 0.55, 0.50)]
+    cal = kb.calibrate(day1 + day2)
+    assert all(t.p == 0.55 for t in cal[:40])  # day 1: no earlier results -> model probability unchanged
+    assert cal[-1].p < 0.55  # day 2 learns from day 1's (all lost) results only
+
+
+def test_backtest_kelly_respects_mode_caps():
+    from datetime import UTC, datetime, timedelta
+
+    kb = _kb()
+    d0 = datetime(2026, 10, 1, tzinfo=UTC)
+    ts = [kb.Trade(d0 + timedelta(minutes=15 * i), "DOGE", "yes", 50, i % 2 == 0, 0.9, 0.85) for i in range(50)]
+    for mode in KellyMode:
+        r = kb.simulate(mode.value, ts, 1000.0, 0.07, mode)
+        assert r.trades and r.staked / r.trades <= 1000 * 1.3 * mode.position_cap  # bankroll may grow a little
+    fixed = kb.simulate("FIXED", ts, 1000.0, 0.07, None)
+    assert fixed.staked / fixed.trades <= 10.0 + 1e-9
