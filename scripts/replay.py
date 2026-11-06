@@ -46,7 +46,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 async def download_and_replay(s: Settings, days: int, assets: list[str], db: Repository,
-                              trades: bool = True) -> ReplayStats:
+                              trades: bool = True, download_only: bool = False) -> ReplayStats:
     signer = None
     if s.has_kalshi_credentials:
         try:
@@ -95,6 +95,13 @@ async def download_and_replay(s: Settings, days: int, assets: list[str], db: Rep
                         if prev not in spot_by_day:
                             spot_by_day[prev] = await spot.day(asset, close - timedelta(days=1))
                         prices = spot_by_day[prev] + prices
+                    if download_only:  # cache only: no replay, nothing held in memory, no database
+                        stats.markets += 1
+                        no_spot += 0 if prices else 1
+                        if len(spot_by_day) > 3:  # keep only the last few days of prices in memory
+                            for k in sorted(spot_by_day)[:-3]:
+                                del spot_by_day[k]
+                        continue
                     obs = replay_market(rec, asset, prices, replay_engine)
                     n_obs += len(obs)
                     no_spot += 0 if prices else 1
@@ -136,6 +143,9 @@ def main() -> None:
     ap.add_argument("--report-only", action="store_true", help="skip downloading; analyse stored replay data")
     ap.add_argument("--rps", type=float, default=15.0,
                     help="Kalshi requests per second (default 15; lower it if you see rate-limit errors)")
+    ap.add_argument("--download-only", action="store_true",
+                    help="only download into data/replay_cache (low memory, safe to stop and re-run); skips the "
+                         "replay and report. guide_test.py / kelly_backtest.py read the cache directly")
     ap.add_argument("--no-trades", action="store_true",
                     help="download candles only: ~2x faster and smaller; enough for scripts/fairvalue.py, "
                          "but the momentum replay loses its trade-flow features")
@@ -155,7 +165,8 @@ def main() -> None:
         repo = Repository(Database(f"sqlite:///{Path(args.db).resolve()}"))
         repo.init()
         try:
-            stats = asyncio.run(download_and_replay(s, args.days, assets, repo, trades=not args.no_trades))
+            stats = asyncio.run(download_and_replay(s, args.days, assets, repo, trades=not args.no_trades,
+                                                    download_only=args.download_only))
         except (OSError, OperationalError) as exc:
             if "full" in str(exc).lower() or getattr(exc, "errno", None) == 28:
                 print("\n❌ DISK FULL. Free space, then re-run (finished downloads are cached):\n"
@@ -163,6 +174,10 @@ def main() -> None:
                       "   or enlarge Linux: Settings > About ChromeOS > Developers > Linux > Disk size")
                 sys.exit(1)
             raise
+        if args.download_only:
+            print(f"\nDownloaded/cached {stats.markets} markets into data/replay_cache. Next:\n"
+                  "  python scripts/guide_test.py --assets " + ",".join(assets) + " --before 2026-10-05")
+            return
         print(f"\nReplayed {stats.markets} markets -> {stats.observations:,} observations. "
               f"Skipped: {dict(stats.skipped) or 'none'}")
     obs = repo.observations(source="replay")
