@@ -194,3 +194,44 @@ def test_old_forward_test_marker_is_migrated(repo):
                    profiles=load_profiles(read_env=False)).forward_test
     assert m["start"] == "2026-11-04T06:00:00+00:00" and m["coins"]["HYPE"] == m["start"]
     assert m["coins"]["XRP"] > m["start"]  # newly added coin starts now
+
+
+def test_pure_forward_test_never_waits_for_calibration_on_paper(repo):
+    from app.data.btc_feed import FixtureBTCFeed
+    from app.kalshi.fixtures import FixtureKalshiClient
+    from app.risk.profiles import load_profiles
+    from app.runtime import BotRuntime
+    from tests.conftest import make_settings
+
+    def params(pure):
+        rt = BotRuntime(make_settings(strategy_mode="btc", assets="HYPE", fair_value_pure=pure), repo,
+                        FixtureKalshiClient(), underlying=FixtureBTCFeed(), profiles=load_profiles(read_env=False))
+        return rt.btc_params(rt.profile(RiskLevel.MEDIUM))
+
+    assert params(False).require_calibration  # Medium normally needs calibrated probabilities
+    assert not params(True).require_calibration  # ...but the paper forward test collects that evidence
+
+
+async def test_short_kalshi_blips_send_no_alerts(runtime):
+    sent = []
+
+    async def notify(kind, key, text, buttons=None, **kw):
+        sent.append(kind)
+
+    from types import SimpleNamespace
+
+    runtime.notify = notify
+    runtime.discovery.state.current["BTC"] = make_info()
+    runtime.client = SimpleNamespace(healthy=False)
+    await runtime._connectivity_alerts(now=1000)
+    await runtime._connectivity_alerts(now=1100)  # 100 s down: still quiet
+    runtime.client.healthy = True
+    await runtime._connectivity_alerts(now=1110)
+    assert sent == []  # a blip: nothing sent, no "reconnected" either
+    runtime.client.healthy = False
+    await runtime._connectivity_alerts(now=2000)
+    await runtime._connectivity_alerts(now=2200)  # 200 s down: one alert
+    await runtime._connectivity_alerts(now=2300)
+    runtime.client.healthy = True
+    await runtime._connectivity_alerts(now=2310)
+    assert sent == ["kalshi_down", "kalshi_up"]

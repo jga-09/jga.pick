@@ -173,6 +173,7 @@ class BotRuntime:
         self.last_poll_at: datetime | None = None
         self.last_error: str | None = None
         self._kalshi_down_notified = False
+        self._unhealthy_since: float | None = None
         self._snap_saved: dict[str, float] = {}
         self._sig_saved: dict[str, tuple[str, float]] = {}
         self._daily_limit_alerted: str | None = None
@@ -631,7 +632,10 @@ class BotRuntime:
             max_spread_cents=p.max_spread_cents, min_liquidity=p.min_liquidity_contracts,
             min_time_sec=max(p.min_time_remaining_sec, s.entry_min_left_sec), max_time_sec=s.entry_max_left_sec,
             blocked_regimes=p.regimes_blocked,
-            max_late_move_cents=p.max_late_move_cents, require_calibration=p.require_known_ev,
+            # FAIR_VALUE_PURE is a paper forward test that COLLECTS the calibration evidence, so paper trades never
+            # wait for it (live always requires calibration, and pure mode is never live anyway)
+            max_late_move_cents=p.max_late_move_cents,
+            require_calibration=p.require_known_ev and not s.fair_value_pure,
             fee_rate=s.fee_rate, slippage_cents=s.paper_slippage_cents, kalshi_stale_sec=s.stale_data_sec,
             btc_stale_sec=s.btc_feed_stale_sec, max_skew_sec=s.max_data_skew_sec,
             min_entry_cents=5.0 if s.fair_value_pure else p.min_entry_price_cents,
@@ -990,14 +994,22 @@ class BotRuntime:
         await self._connectivity_alerts()
         return results
 
-    async def _connectivity_alerts(self) -> None:
+    async def _connectivity_alerts(self, now: float | None = None) -> None:
+        """Alert only for real outages (3+ minutes); short blips retry silently and send nothing."""
+        now = time.time() if now is None else now
         healthy = getattr(self.client, "healthy", True)
-        if not healthy and not self._kalshi_down_notified and self.discovery.state.current:
-            self._kalshi_down_notified = True
-            await self.notify("kalshi_down", "kalshi_down", "⚠️ <b>KALSHI DISCONNECTED</b>\nRetrying with backoff…")
-        elif healthy and self._kalshi_down_notified:
+        if not healthy:
+            self._unhealthy_since = self._unhealthy_since or now
+            if (not self._kalshi_down_notified and self.discovery.state.current
+                    and now - self._unhealthy_since >= 180):
+                self._kalshi_down_notified = True
+                await self.notify("kalshi_down", "kalshi_down",
+                                  "⚠️ <b>KALSHI DISCONNECTED</b> for 3+ minutes\nRetrying with backoff…", everyone=True)
+            return
+        self._unhealthy_since = None
+        if self._kalshi_down_notified:  # "reconnected" only after a "disconnected" was actually sent
             self._kalshi_down_notified = False
-            await self.notify("kalshi_up", "kalshi_up", "🟢 <b>MARKET DATA RECONNECTED</b>")
+            await self.notify("kalshi_up", "kalshi_up", "🟢 <b>MARKET DATA RECONNECTED</b>", everyone=True)
 
     async def _poll_loop(self) -> None:
         while True:
