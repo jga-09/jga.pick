@@ -889,7 +889,10 @@ def large_loss_alert(pos: Position) -> str:
     return f"🔻 <b>LARGE LOSS</b>\n{escape(pos.label)}: {money(pos.realized_pnl)}"
 
 
-def daily_limit_alert(p: RiskProfile) -> str:
+def daily_limit_alert(p: RiskProfile, keep_trading: bool = False) -> str:
+    if keep_trading:
+        return (f"📝 <b>DAILY LOSS LIMIT PASSED (paper)</b>\n{p.level.badge} limit ${p.max_daily_loss_usd:g}.\n"
+                "PAPER_NO_LOSS_STOPS is on, so paper trading continues to collect data. Real money would stop here.")
     return (f"🛑 <b>DAILY LOSS LIMIT REACHED</b>\n{p.level.badge} limit ${p.max_daily_loss_usd:g}.\n"
             "New trades are blocked until tomorrow (UTC).")
 

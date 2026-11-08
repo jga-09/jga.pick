@@ -235,3 +235,22 @@ async def test_short_kalshi_blips_send_no_alerts(runtime):
     runtime.client.healthy = True
     await runtime._connectivity_alerts(now=2310)
     assert sent == ["kalshi_down", "kalshi_up"]
+
+
+def test_paper_no_loss_stops_keeps_paper_trading_but_never_live():
+    from datetime import timedelta as td
+
+    from app.risk.manager import RiskManager
+
+    p = PROFILES[RiskLevel.HIGH]
+    snap = quote_snapshot(make_info(remaining=600, elapsed=300))
+    lost = dict(daily_realized_pnl=-p.max_daily_loss_usd - 5, last_loss_at=utcnow() - td(seconds=10),
+                consecutive_losses=p.max_consecutive_losses + 2)
+    strict = _RM(PositionSizer(0.07), stale_after_sec=30, price_buffer_cents=2, session=GUIDE)
+    d = strict.evaluate(sig(), snap, p, ctx(**lost))
+    assert not d.approved and any("Daily loss" in f for f in d.failures)
+    free = _RM(PositionSizer(0.07), stale_after_sec=30, price_buffer_cents=2, session=GUIDE, paper_no_loss_stops=True)
+    d = free.evaluate(sig(), snap, p, ctx(**lost))
+    assert not any(k in f for f in d.failures for k in ("Daily loss", "cooldown", "in a row", "Sitting out"))
+    live = free.evaluate(sig(), snap, p, ctx(mode="live", **lost))
+    assert any("Daily loss" in f for f in live.failures)  # real money keeps every limit

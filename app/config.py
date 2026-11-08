@@ -152,6 +152,9 @@ class Settings(BaseSettings):
     min_edge_cents: float = Field(0.0, ge=0, le=50)  # floor on the required net edge after fees + slippage
     skip_windows_after_loss: int = Field(0, ge=0, le=8)  # sit out this many 15-min windows after a loss
     max_trades_per_day: int = Field(0, ge=0, le=500)  # max markets entered per UTC day
+    # PAPER ONLY - data collection: never stop paper trading for losses (daily loss limit, loss cooldown,
+    # losing-streak pause, sit-out after a loss, adaptive pause). Live money ALWAYS keeps every limit.
+    paper_no_loss_stops: bool = False
     # Send a P&L image after every finished trade and when the bot is stopped.
     pnl_image: bool = True
     strong_signal_alert_min_confidence: int = Field(80, ge=0, le=100)

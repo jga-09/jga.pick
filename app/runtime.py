@@ -157,6 +157,7 @@ class BotRuntime:
                                 settings.order_price_tolerance_cents, ev_gate=settings.ev_gate,
                                 strategy_mode=settings.strategy_mode, kelly_sizing=settings.kelly_sizing,
                                 fair_value_pure=settings.fair_value_pure,
+                                paper_no_loss_stops=settings.paper_no_loss_stops,
                                 session=SessionRules(
                                     entry_min_left_sec=settings.entry_min_left_sec,
                                     entry_max_left_sec=settings.entry_max_left_sec,
@@ -711,6 +712,8 @@ class BotRuntime:
         est = estimate_probability(terms, price, bars, now, t_left, self.btc_cfg)
         book = snap.orderbook is not None
         paused = self.adaptive.reason if self.adaptive.mode == "PAUSED" else ""
+        if self.settings.paper_no_loss_stops and self.state.mode == "paper":
+            paused = ""  # data collection: paper never pauses for losses
         inp = BTCInputs(
             now=now, terms=terms, features=feats, regime=classify_regime(feats, self.btc_cfg), estimate=est,
             yes_ask=snap.yes_ask, no_ask=snap.no_ask, yes_bid=snap.yes_bid, no_bid=snap.no_bid, t_left_sec=t_left,
@@ -932,7 +935,8 @@ class BotRuntime:
         today = day_key()
         if -self.portfolio.daily_realized(pos.mode) >= prof.max_daily_loss_usd and self._daily_limit_alerted != today:
             self._daily_limit_alerted = today
-            await self.notify("daily_limit", f"daily:{today}", messages.daily_limit_alert(prof))
+            keep = self.settings.paper_no_loss_stops and pos.mode == "paper"
+            await self.notify("daily_limit", f"daily:{today}", messages.daily_limit_alert(prof, keep_trading=keep))
 
     # ----------------------------------------------------------------- loops
     async def run_discovery(self) -> None:

@@ -120,7 +120,9 @@ class RiskDecision:
 class RiskManager:
     def __init__(self, sizer: PositionSizer, stale_after_sec: float = 30.0, price_buffer_cents: float = 2.0,
                  ev_gate: str = "lower", strategy_mode: str = "quality", kelly_sizing: bool = False,
-                 session: SessionRules | None = None, fair_value_pure: bool = False) -> None:
+                 session: SessionRules | None = None, fair_value_pure: bool = False,
+                 paper_no_loss_stops: bool = False) -> None:
+        self.paper_no_loss_stops = paper_no_loss_stops  # PAPER only: keep trading through losses (data collection)
         self.session = session or SessionRules()
         self.fair_value_pure = fair_value_pure
         self.ev_gate = ev_gate
@@ -133,12 +135,16 @@ class RiskManager:
         self.stale_after_sec = stale_after_sec
         self.price_buffer_cents = price_buffer_cents
 
+    def _no_stops(self, ctx: RiskContext) -> bool:
+        return self.paper_no_loss_stops and ctx.mode == "paper"
+
     def _kelly(self, profile: RiskProfile, ctx: RiskContext, limit: float, btc: Any, estimate: Any,
                liquidity: float | None) -> KellySizing:
         p_point, p_low, calibrated = _kelly_probability(btc, estimate)
         return kelly_size(KellyMode(profile.level.value), KellyInput(
             p_point=p_point, p_low=p_low, price_cents=limit, bankroll_usd=ctx.balance_usd,
-            remaining_daily_loss_usd=max(0.0, profile.max_daily_loss_usd + min(0.0, ctx.daily_realized_pnl)),
+            remaining_daily_loss_usd=(1e9 if self._no_stops(ctx) else
+                                      max(0.0, profile.max_daily_loss_usd + min(0.0, ctx.daily_realized_pnl))),
             remaining_open_risk_usd=max(0.0, profile.max_total_exposure_usd - ctx.open_exposure_usd),
             calibrated=calibrated, fee_rate=self.sizer.fee_rate, max_position_usd=profile.max_position_usd,
             liquidity_contracts=liquidity, require_calibration=ctx.mode == "live"))
@@ -202,8 +208,10 @@ class RiskManager:
             fails.append("Market closed")
         elif remaining < profile.min_time_remaining_sec and not btc_mode:
             fails.append(f"Too close to expiry ({int(remaining)}s < {profile.min_time_remaining_sec}s)")
+        nostop = self._no_stops(ctx)
         if remaining > 0:
-            fails.extend(self.session.failures(remaining, ctx, now))
+            fails.extend(f for f in self.session.failures(remaining, ctx, now)
+                         if not (nostop and f.startswith("Sitting out")))
         age = snap.age_sec(now)
         if age > self.stale_after_sec:
             fails.append(f"Stale market data ({int(age)}s old)")
@@ -228,7 +236,7 @@ class RiskManager:
         if side and not btc_mode and snap.orderbook is not None and liquidity < profile.min_liquidity_contracts:
             fails.append(f"Thin liquidity ({liquidity:.0f} < {profile.min_liquidity_contracts:.0f} contracts)")
 
-        if -ctx.daily_realized_pnl >= profile.max_daily_loss_usd:
+        if -ctx.daily_realized_pnl >= profile.max_daily_loss_usd and not nostop:
             fails.append(f"Daily loss limit reached (${profile.max_daily_loss_usd:.2f})")
         if ctx.open_positions >= profile.max_open_positions:
             fails.append(f"Max open positions reached ({profile.max_open_positions})")
@@ -238,13 +246,13 @@ class RiskManager:
             fails.append("Already holding a position in this market")
         if snap.ticker in ctx.inflight_tickers:
             fails.append("Order already in flight for this market")
-        if ctx.last_loss_at and (now - ctx.last_loss_at).total_seconds() < profile.loss_cooldown_sec:
+        if ctx.last_loss_at and (now - ctx.last_loss_at).total_seconds() < profile.loss_cooldown_sec and not nostop:
             left = profile.loss_cooldown_sec - (now - ctx.last_loss_at).total_seconds()
             fails.append(f"Loss cooldown ({int(left)}s left)")
         last = ctx.last_trade_at.get(snap.ticker)
         if last and (now - last).total_seconds() < profile.trade_cooldown_sec:
             fails.append("Recent trade cooldown on this market")
-        if ctx.consecutive_losses >= profile.max_consecutive_losses and ctx.last_loss_at is not None:
+        if ctx.consecutive_losses >= profile.max_consecutive_losses and ctx.last_loss_at is not None and not nostop:
             left = profile.streak_pause_sec - (now - ctx.last_loss_at).total_seconds()
             if left > 0:
                 fails.append(f"Trading paused: {ctx.consecutive_losses} losses in a row "
@@ -256,7 +264,7 @@ class RiskManager:
         if btc_mode:
             # The BTC engine replaces the quality/grade/historical-EV gates with its own
             # probability-model, net-edge and no-trade filters; every safety check above still applies.
-            if ctx.adaptive_mode == "PAUSED":
+            if ctx.adaptive_mode == "PAUSED" and not nostop:
                 fails.append(f"Trading paused: {ctx.adaptive_reason}")
             if btc is not None:
                 for r in btc.rejections:
@@ -266,7 +274,7 @@ class RiskManager:
         elif confirm:
             # The confirmation strategy replaces the quality/grade/no-trade/EV gates (those were
             # not part of the backtested rule); every execution and safety check above still applies.
-            if ctx.adaptive_mode == "PAUSED":
+            if ctx.adaptive_mode == "PAUSED" and not nostop:
                 fails.append(f"Trading paused: {ctx.adaptive_reason}")
             warnings.append("EXPERIMENTAL confirmation strategy (paper forward test)")
             checks = _confirm_checklist(signal, snap, profile, side, ctx)
@@ -279,7 +287,7 @@ class RiskManager:
                 min_q += 5
                 grades = grades & {"A+", "A"}
                 warnings.append(f"Caution mode: {ctx.adaptive_reason}")
-            if ctx.adaptive_mode == "PAUSED":
+            if ctx.adaptive_mode == "PAUSED" and not nostop:
                 fails.append(f"Trading paused: {ctx.adaptive_reason}")
             if a.hard_flags:
                 fails.append(f"No-trade filter: {a.reasons[0]}")
@@ -322,7 +330,8 @@ class RiskManager:
                              liquidity if snap.orderbook is not None else None)
             # every path: a new stake can never exceed what is left of today's loss limit
             kw: dict[str, Any] = {
-                "remaining_daily_loss_usd": profile.max_daily_loss_usd + min(0.0, ctx.daily_realized_pnl)}
+                "remaining_daily_loss_usd": (None if nostop else
+                                             profile.max_daily_loss_usd + min(0.0, ctx.daily_realized_pnl))}
             if btc_mode and btc is not None and btc.edge is not None and self.fair_value_pure:
                 kw.update(scale=1.0, p_win=btc.edge.p_point)  # same size rule for every trade in the test
             elif btc_mode and btc is not None and btc.edge is not None:
