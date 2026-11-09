@@ -118,17 +118,19 @@ PRICE_MOVES: dict[str, dict[str, float]] = {}  # asset -> month -> % change of t
 
 
 def run(asset: str, cache: Path, slip: float, holdout_days: int, totals: dict, before: datetime | None = None,
-        chosen: dict | None = None) -> None:
+        chosen: dict | None = None, after: datetime | None = None) -> None:
     bars = load_crypto_bars(cache, asset)
     first_last: dict[str, list[float]] = {}
     for b in bars:
-        if before is None or b.end < before.timestamp():
+        if (before is None or b.end < before.timestamp()) and (after is None or b.end >= after.timestamp()):
             fl = first_last.setdefault(f"{datetime.fromtimestamp(b.end, UTC):%Y-%m}", [b.close, b.close])
             fl[1] = b.close
     PRICE_MOVES[asset] = {k: v[1] / v[0] - 1 for k, v in first_last.items() if v[0] > 0}
     markets = [m for m in load_markets(cache, f"KX{asset}15M-") if m["result"] in ("yes", "no") and m["strike"]]
     if before is not None:
         markets = [m for m in markets if m["close"] < before]  # only markets the rule was NOT chosen on
+    if after is not None:
+        markets = [m for m in markets if m["close"] >= after]  # only markets AFTER the rule was fixed
     if not bars or not markets:
         hint = "--days 120" if before else "--days 30"
         print(f"\n{asset}: no data (run: python scripts/replay.py {hint} --no-trades --assets {asset})")
@@ -159,7 +161,7 @@ def run(asset: str, cache: Path, slip: float, holdout_days: int, totals: dict, b
         print(f"  {name}")
         for label, xs in (("earlier", dev), ("last 7d", hold)):
             print("    " + line(label, [x[0] for x in xs]))
-        if before is not None:
+        if before is not None or after is not None:
             print("    " + line("all", [x[0] for x in dev + hold]))
 
 
@@ -180,14 +182,18 @@ def main() -> int:
     ap.add_argument("--holdout-days", type=int, default=7)
     ap.add_argument("--before", help="YYYY-MM-DD: only markets closing before this date - the period the rule was "
                                      "NOT chosen on (fresh out-of-sample test; HYPE/DOGE were chosen on 2026-10-05..)")
+    ap.add_argument("--after", help="YYYY-MM-DD: only markets closing on/after this date - e.g. the days since the "
+                                    "rule was fixed (a forward test on history)")
     a = ap.parse_args()
     before = datetime.fromisoformat(a.before).replace(tzinfo=UTC) if a.before else None
+    after = datetime.fromisoformat(a.after).replace(tzinfo=UTC) if a.after else None
     totals: dict[str, tuple[list[float], list[float]]] = {}
     chosen: dict[str, list[tuple[datetime, float]]] = {}
     for asset in [x.strip().upper() for x in a.assets.split(",") if x.strip()]:
-        run(asset, Path(a.cache), a.slippage, a.holdout_days, totals, before, chosen)
-    if before is not None and chosen:
-        print(f"\n=== FRESH-PERIOD VERDICT for the bot's rule ({CHOSEN}), markets before {a.before} ===")
+        run(asset, Path(a.cache), a.slippage, a.holdout_days, totals, before, chosen, after)
+    if (before is not None or after is not None) and chosen:
+        span = " ".join(x for x in (f"from {a.after}" if a.after else "", f"before {a.before}" if a.before else "") if x)
+        print(f"\n=== FRESH-PERIOD VERDICT for the bot's rule ({CHOSEN}), markets {span} ===")
         print("    same rules as scripts/forward_report.py: PASS = 150+ trades and the whole 95% range above 0")
         for asset, rs in chosen.items():
             ps = [r for _, r, _ in rs]
