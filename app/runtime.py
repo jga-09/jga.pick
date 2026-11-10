@@ -730,7 +730,7 @@ class BotRuntime:
     def _build_model(self) -> HistoricalModel:
         if self.btc_mode:
             # one calibration per coin: BTC's track record never vouches for HYPE or DOGE
-            obs = self.repo.observations(source="btc")
+            obs = self.base_repo.observations(source="btc", since=self._model_since())
             self.calibrations = {
                 a: calibration_report([o for o in obs if str(getattr(o, "asset", "")).upper() == a],
                                       self.settings.hist_min_samples, self.settings.calibration_ece_tol)
@@ -738,15 +738,27 @@ class BotRuntime:
             first = self.settings.asset_list[0] if self.settings.asset_list else "BTC"
             self.calibration = self.calibrations.get("BTC") or self.calibrations.get(first)
         return HistoricalModel(
-            self.repo.observations(source="live"), self.settings.hist_min_samples,
+            self.base_repo.observations(source="live", since=self._model_since()), self.settings.hist_min_samples,
             self.settings.calibration_prior_strength, self.settings.fee_rate, self.settings.paper_slippage_cents,
         )
+
+    def _model_since(self) -> datetime | None:
+        days = self.settings.model_window_days
+        return utcnow() - timedelta(days=days) if days else None
 
     def refresh_model(self) -> HistoricalModel:
         self.model = self._build_model()
         self._model_built = time.time()
         self._research.clear()
         return self.model
+
+    async def refresh_model_async(self) -> HistoricalModel:
+        """Rebuild statistics in a worker thread so Telegram and the scanner never freeze while it runs."""
+        model = await asyncio.to_thread(self._build_model)
+        self.model = model
+        self._model_built = time.time()
+        self._research.clear()
+        return model
 
     def research(self, key: str) -> Any:
         from app.telegram.analytics_views import compute_research
@@ -1350,9 +1362,9 @@ class BotRuntime:
         while True:
             try:
                 await self.settle_positions()
-                labelled = await self.label_observations()
-                if labelled or time.time() - self._model_built > self.settings.model_refresh_sec:
-                    self.refresh_model()
+                await self.label_observations()
+                if time.time() - self._model_built > self.settings.model_refresh_sec:
+                    await self.refresh_model_async()  # at most every MODEL_REFRESH_SEC, off the main loop
                 self.update_adaptive()
                 for acct in self.all_accounts():  # each user's own Kalshi balance, with their own key
                     with self.as_user(acct.user_id):

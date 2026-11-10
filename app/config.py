@@ -119,6 +119,8 @@ class Settings(BaseSettings):
     strategy_mode: Literal["btc", "quality", "confirm"] = "btc"
     observation_retention_days: int = Field(365, ge=7)
     model_refresh_sec: float = Field(600.0, ge=30)
+    # statistics/calibration use only the last N days of observations (0 = all). Keeps rebuilds fast as data grows.
+    model_window_days: int = Field(30, ge=0, le=3650)
     signal_history_size: int = Field(240, ge=20, le=5000)
 
     # --- Telegram UI / alerts -------------------------------------------

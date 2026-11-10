@@ -268,3 +268,12 @@ def test_real_kalshi_rule_text_is_verified_for_every_coin(asset):
     assert t.averaging_window_sec == 60
     other = "DOGE" if asset != "DOGE" else "HYPE"  # a market whose rules name ANOTHER coin's index is refused
     assert not interpret_contract(_coin_info(asset, rules.replace(f"{asset}USDRTI", f"{other}USDRTI"))).verified
+
+
+async def test_model_refresh_runs_off_the_main_loop_and_uses_a_recent_window(runtime):
+    from datetime import timedelta as td
+
+    assert runtime._model_since() is not None and runtime._model_since() > utcnow() - td(days=31)
+    before = runtime._model_built
+    await runtime.refresh_model_async()
+    assert runtime._model_built >= before and runtime.model is not None

@@ -518,8 +518,7 @@ def _backtest_one_liner(rep: dict[str, Any] | None) -> str:
 
 
 def calibration(rt: BotRuntime) -> Screen:
-    rt.refresh_model()
-    cal = rt.calibration
+    cal = rt.calibration  # rebuilt in the background every MODEL_REFRESH_SEC (rebuilding here froze the bot)
     lines = ["🎯 <b>ARE THE BOT'S ODDS ACCURATE?</b>", "",
              "When the bot says something has a 70% chance, it should happen about 7 times in 10.", ""]
     lines += _accuracy_lines(rt, cal.state if cal else None)
