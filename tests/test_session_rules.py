@@ -254,3 +254,17 @@ def test_paper_no_loss_stops_keeps_paper_trading_but_never_live():
     assert not any(k in f for f in d.failures for k in ("Daily loss", "cooldown", "in a row", "Sitting out"))
     live = free.evaluate(sig(), snap, p, ctx(mode="live", **lost))
     assert any("Daily loss" in f for f in live.failures)  # real money keeps every limit
+
+
+@pytest.mark.parametrize("asset", ["HYPE", "DOGE", "ETH", "SOL", "XRP", "BNB", "NEAR", "ZEC"])
+def test_real_kalshi_rule_text_is_verified_for_every_coin(asset):
+    from app.kalshi.contract import interpret_contract
+
+    rules = (f"If the simple average of the sixty seconds of CF Benchmarks' {asset}USDRTI before 11:45 PM EST on "
+             f"Nov 9, 2026 is at least the simple average of the sixty seconds of CF Benchmarks' {asset}USDRTI before "
+             "11:30 PM EST on November 9, 2026, then the market resolves to Yes.")
+    t = interpret_contract(_coin_info(asset, rules))
+    assert t.verified, t.problems
+    assert t.averaging_window_sec == 60
+    other = "DOGE" if asset != "DOGE" else "HYPE"  # a market whose rules name ANOTHER coin's index is refused
+    assert not interpret_contract(_coin_info(asset, rules.replace(f"{asset}USDRTI", f"{other}USDRTI"))).verified

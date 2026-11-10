@@ -34,7 +34,8 @@ def _asset_words(asset: str) -> re.Pattern[str]:
     if asset == "BTC":
         return _ASSET_WORDS
     names = "|".join(re.escape(n) for n in ASSET_ALIASES.get(asset, (asset,)))
-    return re.compile(rf"\b({names})\b", re.I)
+    # Kalshi names the index as one word: "CF Benchmarks' HYPEUSDRTI" (also accept HYPEUSD / HYPE-USD)
+    return re.compile(rf"\b({names})(?:-?USD(?:RTI)?)?\b", re.I)
 
 
 def _name(asset: str) -> str:
