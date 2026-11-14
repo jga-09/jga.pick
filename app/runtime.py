@@ -145,6 +145,9 @@ class BotRuntime:
         self.adaptive = AdaptiveState("NORMAL")
         self._obs_keys: set[tuple[str, int]] = set()
         self._last_signal: dict[str, SignalResult] = {}  # survives market removal (for exit analysis)
+        # (user, ticker) -> (fingerprint, decision, time): screens reuse the scanner's risk check instead of
+        # re-running ~6 database queries per market on every render
+        self._decisions: dict[tuple[int, str], tuple[tuple, RiskDecision, float]] = {}
         from app.telegram.analytics_views import ResearchCache
 
         self._research = ResearchCache()
@@ -581,14 +584,39 @@ class BotRuntime:
         infos = sorted(self.discovery.state.current.values(), key=lambda m: (order.get(m.asset, 99), m.asset))
         return [self.view(m.ticker) for m in infos]  # type: ignore[misc]
 
-    def view(self, ticker: str) -> MarketView | None:
+    def view(self, ticker: str, fresh: bool = False) -> MarketView | None:
         info = self.discovery.state.by_ticker.get(ticker)
         snap = self.market_data.latest.get(ticker)
         if info is None and snap is None:
             return None
         sig = self.engine.latest.get(ticker)
-        decision = self.check_risk(sig, snap) if sig and snap else None
+        decision = None
+        if sig and snap:
+            decision = self.check_risk(sig, snap) if fresh else self._cached_decision(sig, snap)
         return MarketView(info or snap.info, snap, sig, decision)  # type: ignore[union-attr]
+
+    DECISION_TTL_SEC = 10.0
+
+    def _decision_key(self, sig: SignalResult, snap: MarketSnapshot) -> tuple[tuple[int, str], tuple]:
+        """Everything a risk check depends on that can change without a new signal (all in memory, no I/O)."""
+        st, pf = self.state, self.portfolio
+        fp = (id(sig), snap.ts, st.risk_level, st.mode, st.kelly_sizing, st.running, st.paused, st.emergency_stop,
+              repr(st.risk_overrides), len(pf.positions), len(pf.inflight), len(pf.unresolved), pf.last_loss_at,
+              self.adaptive.mode)
+        return (self.current_user, snap.ticker), fp
+
+    def _remember_decision(self, sig: SignalResult, snap: MarketSnapshot, decision: RiskDecision) -> None:
+        key, fp = self._decision_key(sig, snap)
+        self._decisions[key] = (fp, decision, time.time())
+
+    def _cached_decision(self, sig: SignalResult, snap: MarketSnapshot) -> RiskDecision:
+        key, fp = self._decision_key(sig, snap)
+        hit = self._decisions.get(key)
+        if hit and hit[0] == fp and time.time() - hit[2] < self.DECISION_TTL_SEC:
+            return hit[1]
+        decision = self.check_risk(sig, snap)
+        self._decisions[key] = (fp, decision, time.time())
+        return decision
 
     def focus_view(self) -> MarketView | None:
         views = self.markets()
@@ -843,7 +871,7 @@ class BotRuntime:
         ))
 
     def propose(self, ticker: str) -> tuple[TradeTicket | None, MarketView | None]:
-        view = self.view(ticker)
+        view = self.view(ticker, fresh=True)  # a trade ticket always gets a fresh risk check
         if not view or not view.decision or not view.signal or not view.snapshot:
             return None, view
         if not view.decision.approved:
@@ -962,6 +990,8 @@ class BotRuntime:
             self.engine.forget(ticker)
         keep = set(st.by_ticker) | {p.ticker for p in self.portfolio.open_positions()}
         self._last_signal = {k: v for k, v in self._last_signal.items() if k in keep}
+        live = set(st.by_ticker)
+        self._decisions = {k: v for k, v in self._decisions.items() if k[1] in live}  # expired markets
         if self.ws:
             self.ws.set_markets(m.ticker for m in st.current.values())
 
@@ -1075,6 +1105,7 @@ class BotRuntime:
 
     async def _process_for_user(self, sig: SignalResult, snap: MarketSnapshot) -> None:
         decision = self.check_risk(sig, snap)
+        self._remember_decision(sig, snap, decision)  # screens reuse it until the signal or account state changes
         uid = self.current_user
         strong = (decision.approved and sig.grade in ("A+", "A")
                   and sig.confidence >= self.settings.strong_signal_alert_min_confidence)

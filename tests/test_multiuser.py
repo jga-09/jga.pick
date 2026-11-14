@@ -217,3 +217,23 @@ def test_kelly_recommendation_is_on_every_decision(rt2):
         d = rt2.check_risk(sig, rt2.market_data.latest[info.ticker])
     assert d.kelly is not None and d.kelly.mode.value == "high"
     assert d.kelly.contracts == 0 or d.kelly.max_loss_usd <= 1000 * 0.03 + 1e-9
+
+
+def test_screens_reuse_the_risk_check_until_something_changes(rt2, monkeypatch):
+    info = make_info()
+    with rt2.as_user(OWNER):
+        rt2.store.update(running=True, risk_level=RiskLevel.HIGH)
+    feed_history(rt2, info, "up")
+    calls = []
+    real = rt2.check_risk
+    monkeypatch.setattr(rt2, "check_risk", lambda *a, **k: calls.append(1) or real(*a, **k))
+    with rt2.as_user(OWNER):
+        first = rt2.view(info.ticker).decision
+        assert rt2.view(info.ticker).decision is first and len(calls) == 1  # 2nd render: cached, no DB work
+        rt2.set_risk_level(RiskLevel.LOW)
+        assert rt2.view(info.ticker).decision.risk_level == RiskLevel.LOW and len(calls) == 2  # state changed
+        rt2.view(info.ticker, fresh=True)
+        assert len(calls) == 3  # trade tickets always re-check
+    with rt2.as_user(OTHER):
+        rt2.view(info.ticker)
+        assert len(calls) == 4  # never served another user's decision
