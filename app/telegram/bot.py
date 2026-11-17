@@ -83,6 +83,9 @@ def build_application(rt: BotRuntime, token: str) -> Application:
     return (
         Application.builder()
         .token(token)
+        # handle several updates at once: one slow button (a Kalshi call, an image) never blocks the next tap.
+        # Safe: duplicate taps are filtered per callback, orders are locked per market, dashboards per chat.
+        .concurrent_updates(True)
         .post_init(post_init)
         .post_shutdown(post_shutdown)
         .build()

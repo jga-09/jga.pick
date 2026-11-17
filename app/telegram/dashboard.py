@@ -28,6 +28,7 @@ class ChatView:
     refreshable: bool = True
     last_text: str = ""
     extra_messages: deque[int] = field(default_factory=lambda: deque(maxlen=200))
+    last_user_action: float = 0.0  # monotonic time of the user's last tap/command in this chat
 
 
 class DashboardManager:
@@ -36,15 +37,28 @@ class DashboardManager:
         self.router = router
         self.refresh_sec = refresh_sec
         self.chats: dict[int, ChatView] = {}
-        self._lock = asyncio.Lock()
+        self._locks: dict[int, asyncio.Lock] = {}  # one per chat: a slow edit in one chat never blocks another
+
+    USER_PRIORITY_SEC = 5.0  # auto-refresh stays out of the way this long after the user's last tap
+    AUTO_TIMEOUT_SEC = 3.0  # auto-refresh gives up quickly on a slow connection (a tap would wait behind it)
+
+    def _lock_for(self, chat_id: int) -> asyncio.Lock:
+        return self._locks.setdefault(chat_id, asyncio.Lock())
 
     async def show(self, chat_id: int, user_id: int, screen: Screen, *, message_id: int | None = None,
-                   new: bool = False) -> None:
+                   new: bool = False, auto: bool = False) -> None:
         view = self.chats.setdefault(chat_id, ChatView(user_id))
         view.user_id = user_id
+        lock = self._lock_for(chat_id)
+        if auto:
+            # the user always goes first: skip this refresh if they are acting or just acted
+            if lock.locked() or time.monotonic() - view.last_user_action < self.USER_PRIORITY_SEC:
+                return
+        else:
+            view.last_user_action = time.monotonic()
         target = None if new else (message_id or view.message_id)
-        async with self._lock:
-            if target is not None and await self._edit(chat_id, target, screen):
+        async with lock:
+            if target is not None and await self._edit(chat_id, target, screen, auto=auto):
                 if message_id is None or message_id == view.message_id or view.message_id is None:
                     view.message_id = target
                     self._remember(view, screen)
@@ -62,13 +76,15 @@ class DashboardManager:
     def _remember(view: ChatView, screen: Screen) -> None:
         view.route, view.refreshable, view.last_text = screen.route, screen.refreshable, screen.text
 
-    async def _edit(self, chat_id: int, message_id: int, screen: Screen) -> bool:
+    async def _edit(self, chat_id: int, message_id: int, screen: Screen, auto: bool = False) -> bool:
         try:
             if _bad_html(screen.text):
                 raise BadRequest("Can't parse entities: pre-check")
+            timeouts = ({"read_timeout": self.AUTO_TIMEOUT_SEC, "write_timeout": self.AUTO_TIMEOUT_SEC,
+                         "connect_timeout": self.AUTO_TIMEOUT_SEC} if auto else {})
             await self.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=screen.text,
                                              parse_mode=ParseMode.HTML, reply_markup=to_markup(screen),
-                                             disable_web_page_preview=True)
+                                             disable_web_page_preview=True, **timeouts)
             return True
         except BadRequest as exc:
             if "not modified" in str(exc).lower():
@@ -78,6 +94,8 @@ class DashboardManager:
             log.warning("DASHBOARD_EDIT_FAILED chat=%s error=%s", chat_id, exc)
             return False
         except RetryAfter as exc:
+            if auto:  # never sleep while holding the chat lock for a background refresh
+                return True
             await asyncio.sleep(float(getattr(exc, "retry_after", 1)))
             return True
         except (TimedOut, NetworkError) as exc:
@@ -150,7 +168,7 @@ class DashboardManager:
                     log.exception("DASHBOARD_RENDER_FAILED route=%s", view.route)
                     continue
                 if screen.text != view.last_text:
-                    await self.show(chat_id, view.user_id, screen)
+                    await self.show(chat_id, view.user_id, screen, auto=True)
 
 
 _ALLOWED_TAG = re.compile(r"</?(b|i|code)>")

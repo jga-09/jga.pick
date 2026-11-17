@@ -89,3 +89,31 @@ async def test_screens_escape_bucket_labels(runtime):
     assert runtime.model.best("time") is not None
     for screen in (M.home(runtime), AV.analytics(runtime), AV.detailed(runtime), AV.calibration(runtime)):
         assert not _bad_html(screen.text), screen.text
+
+
+async def test_auto_refresh_never_gets_in_the_users_way():
+    import asyncio
+    import time
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.telegram.dashboard import DashboardManager
+    from app.telegram.keyboards import Screen
+
+    bot = MagicMock()
+    bot.edit_message_text = AsyncMock()
+    bot.send_message = AsyncMock(return_value=MagicMock(message_id=7))
+    dash = DashboardManager(bot, router=MagicMock(), refresh_sec=15)
+    await dash.show(1, 1, Screen("hello", [], route="home"))  # the user opens the dashboard
+    bot.edit_message_text.reset_mock()
+    await dash.show(1, 1, Screen("auto", [], route="home"), auto=True)
+    assert not bot.edit_message_text.called  # user acted < 5 s ago: the refresh waits
+    dash.chats[1].last_user_action = time.monotonic() - 10
+    async with dash._lock_for(1):  # user's own edit in progress
+        await dash.show(1, 1, Screen("auto", [], route="home"), auto=True)
+    assert not bot.edit_message_text.called
+    await dash.show(1, 1, Screen("auto", [], route="home"), auto=True)
+    assert bot.edit_message_text.call_args.kwargs["read_timeout"] == DashboardManager.AUTO_TIMEOUT_SEC
+    other = asyncio.Lock()
+    async with dash._lock_for(1):  # a slow edit in chat 1 never blocks chat 2
+        await asyncio.wait_for(dash.show(2, 2, Screen("hi", [], route="home")), 1)
+    assert other is not dash._lock_for(2)
