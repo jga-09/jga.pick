@@ -277,3 +277,17 @@ async def test_model_refresh_runs_off_the_main_loop_and_uses_a_recent_window(run
     before = runtime._model_built
     await runtime.refresh_model_async()
     assert runtime._model_built >= before and runtime.model is not None
+
+
+def test_take_profit_percent(runtime):
+    from app.trading.positions import Position
+
+    runtime.settings = runtime.settings.model_copy(update={"take_profit_pct": 50})
+    pos = Position(mode="paper", ticker="T", event_ticker="T", asset="BTC", label="BTC", side="yes", contracts=1,
+                   entry_price=40, entry_fee=0, risk_level="medium")
+    up = quote_snapshot(make_info(), yes_bid=60, yes_ask=61)  # +50%
+    almost = quote_snapshot(make_info(), yes_bid=59, yes_ask=60)  # +47.5%
+    from tests.test_risk import sig as mksig
+    s = mksig()
+    assert "take-profit: up 50%" in (runtime.exit_reason(pos, s, up) or "")
+    assert not (runtime.exit_reason(pos, s, almost) or "").startswith("take-profit")

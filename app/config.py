@@ -146,6 +146,9 @@ class Settings(BaseSettings):
     kelly_sizing: bool = False
     take_profit_cents: float = Field(0.0, ge=0, le=99)  # sell when the bid is this many cents above entry
     take_profit_price_cents: float = Field(0.0, ge=0, le=99)  # sell when the bid reaches this price
+    # sell when the position is up this many PERCENT, like the return % Kalshi shows: (bid - entry) / entry.
+    # e.g. 50 = sell a 40c buy once the bid reaches 60c. 0 = off.
+    take_profit_pct: float = Field(0.0, ge=0, le=1000)
     # Daily recap: one Telegram message after each UTC day closes (trades, P&L after fees, fees, best/worst)
     daily_recap: bool = True
     # --- Session discipline (all strategies; 0 = off). Recommended "guide" values in .env.example ---------

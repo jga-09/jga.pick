@@ -1117,7 +1117,8 @@ class BotRuntime:
         elif not strong and (sig.grade not in ("A+", "A")
                              or sig.confidence < self.settings.strong_signal_alert_min_confidence - 5):
             self._strong.pop(f"{uid}:{snap.ticker}", None)  # hysteresis: re-arm only after it clearly weakens
-        if self.settings.early_exit or self.settings.take_profit_cents or self.settings.take_profit_price_cents:
+        if (self.settings.early_exit or self.settings.take_profit_cents or self.settings.take_profit_price_cents
+                or self.settings.take_profit_pct):
             await self._manage_exits(sig, snap)
         if self.state.auto_trade and decision.approved:
             await self._auto_trade(sig, snap, decision)
@@ -1130,6 +1131,11 @@ class BotRuntime:
         if s.early_exit_stop_loss_pct > 0 and bid is not None and \
                 bid <= pos.entry_price * (1 - s.early_exit_stop_loss_pct / 100):
             return f"stop-loss: value down {s.early_exit_stop_loss_pct:g}%+"
+        if bid is not None and s.take_profit_pct > 0 and pos.entry_price > 0 and \
+                (bid - pos.entry_price) / pos.entry_price * 100 >= s.take_profit_pct:
+            gain = (bid - pos.entry_price) / pos.entry_price * 100
+            return (f"take-profit: up {gain:.0f}% (bid {bid:.0f}¢ vs {pos.entry_price:.0f}¢ paid, "
+                    f"target {s.take_profit_pct:g}%)")
         if bid is not None and s.take_profit_price_cents > 0 and bid >= s.take_profit_price_cents:
             return f"take-profit: bid {bid:.0f}¢ reached the {s.take_profit_price_cents:.0f}¢ target"
         if bid is not None and s.take_profit_cents > 0 and bid - pos.entry_price >= s.take_profit_cents:

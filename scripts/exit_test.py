@@ -9,6 +9,7 @@ minute until 1 minute before close. A cash-out sells at the bid minus slippage a
 
   HOLD          hold to settlement (what the bot does now)
   TP +10/15/20  sell when the bid is 10/15/20 cents above the entry price
+  TP +25/50/100%  sell when the position is up 25/50/100% on the price paid (TAKE_PROFIT_PCT)
   TP 85/90      sell when the bid reaches 85 / 90 cents
   STOP 50%      sell when the bid falls to half the entry price
   MODEL <40%    sell when the fair-value model's own odds for our side fall below 40% (the bot's EARLY_EXIT)
@@ -59,7 +60,8 @@ def bid_for(c, side):
     return 100 - ya if ya is not None and 0 < ya < 100 else None
 
 
-RULES = ["HOLD", "TP +10", "TP +15", "TP +20", "TP 85", "TP 90", "STOP 50%", "MODEL <40%", "TP+15 & STOP"]
+RULES = ["HOLD", "TP +10", "TP +15", "TP +20", "TP +25%", "TP +50%", "TP +100%", "TP 85", "TP 90", "STOP 50%",
+         "MODEL <40%", "TP+15 & STOP"]
 
 
 def should_sell(rule, bid, paid, p_side):
@@ -67,6 +69,9 @@ def should_sell(rule, bid, paid, p_side):
           "TP 85": bid >= 85, "TP 90": bid >= 90}
     if rule in tp:
         return tp[rule]
+    if rule.endswith("%") and rule.startswith("TP +"):  # TAKE_PROFIT_PCT: up X% on the price paid
+        pct = float(rule[4:-1])
+        return paid > 0 and (bid - paid) / paid * 100 >= pct
     if rule == "STOP 50%":
         return bid <= paid * 0.5
     if rule == "MODEL <40%":
