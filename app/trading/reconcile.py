@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from app.errors import KalshiError
@@ -71,13 +71,24 @@ def compare_positions(local: list[Position], exchange: list[dict[str, Any]]) -> 
     return out
 
 
-async def recover_orders(client: Any, repo: Any) -> tuple[list[str], set[str]]:
-    """Resolve live orders left in a non-final state. Returns (notes, tickers to block)."""
+async def recover_orders(client: Any, repo: Any, busy: set[str] | frozenset[str] = frozenset(),
+                         min_age_sec: float = 120.0) -> tuple[list[str], set[str]]:
+    """Resolve live orders left in a non-final state. Returns (notes, tickers to block).
+
+    Orders on a market with an order in flight (``busy``) or younger than ``min_age_sec`` are skipped: the code
+    placing them is still confirming them, and touching them here caused false alerts / wrong 'not placed'."""
     notes: list[str] = []
     block: set[str] = set()
+    now = datetime.now(UTC)
     for row in repo.live_orders(OPEN_STATES):
         coid, ticker = row["client_order_id"], row["ticker"]
         created = row.get("created_at")
+        if ticker in busy:
+            continue
+        if isinstance(created, datetime):
+            c = created if created.tzinfo else created.replace(tzinfo=UTC)
+            if (now - c).total_seconds() < min_age_sec:
+                continue
         since = int(created.timestamp()) - 300 if isinstance(created, datetime) else None
         try:
             orders = await client.get_orders_all(ticker, min_ts=since)

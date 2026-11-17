@@ -351,11 +351,13 @@ class MarketDataService:
             updates["last_price"] = last
         if not updates:
             return None
+        # Kalshi's ticker message carries YES prices only: re-derive NO from them every time, otherwise NO keeps
+        # the previous poll's value while the snapshot looks fresh (e.g. YES ask 72 with NO ask 60).
+        if "yes_bid" in updates and "no_ask" not in updates:
+            updates["no_ask"] = round(100 - updates["yes_bid"], 4)
+        if "yes_ask" in updates and "no_bid" not in updates:
+            updates["no_bid"] = round(100 - updates["yes_ask"], 4)
         snap = replace(prev, ts=utcnow(), source="ws", **updates)
-        if snap.yes_bid is not None and snap.no_ask is None:
-            snap = replace(snap, no_ask=100 - snap.yes_bid)
-        if snap.yes_ask is not None and snap.no_bid is None:
-            snap = replace(snap, no_bid=100 - snap.yes_ask)
         self.latest[ticker] = snap  # type: ignore[index]
         self.last_ws_update = snap.ts
         return snap

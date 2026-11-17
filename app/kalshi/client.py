@@ -68,12 +68,12 @@ class KalshiClient:
     ) -> dict[str, Any]:
         url = f"{self.base_url}{path}"
         headers = {"Accept": "application/json"}
-        if auth or self.signer:
-            if not self.signer:
-                raise KalshiAuthError(0, "this endpoint requires Kalshi API credentials", path)
-            headers.update(self.signer.headers(method, url))
+        if (auth or self.signer) and not self.signer:
+            raise KalshiAuthError(0, "this endpoint requires Kalshi API credentials", path)
         limiter = self._write_limiter if method.upper() != "GET" else self._read_limiter
         await limiter.acquire()
+        if self.signer:  # sign AFTER the rate-limit wait so the timestamp is fresh when the request is sent
+            headers.update(self.signer.headers(method, url))
         clean_params = {k: v for k, v in (params or {}).items() if v is not None}
         try:
             resp = await self._http.request(method, url, params=clean_params, json=json, headers=headers)

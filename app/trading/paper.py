@@ -27,7 +27,7 @@ class PaperExecutor:
         ask = snap.entry_price(ticket.side)
         if ask is None:
             raise OrderRejectedError("no ask available")
-        fill = min(99.0, ask + self.slippage)
+        fill = max(ask, min(99.9, ask + self.slippage))  # never better than the real ask
         if fill > ticket.limit_price_cents:
             raise OrderRejectedError(f"price moved: fill {fill:.0f}¢ > limit {ticket.limit_price_cents:.0f}¢")
         fee = estimate_fee(ticket.contracts, fill, self.fee_rate)
@@ -53,7 +53,7 @@ class PaperExecutor:
         bid = snap.exit_price(pos.side)
         if bid is None:
             raise OrderRejectedError("no bid available to exit")
-        fill = max(1.0, bid - self.slippage)
+        fill = min(bid, max(0.1, bid - self.slippage))  # never better than the real bid
         fee = estimate_fee(pos.contracts, fill, self.fee_rate)
         self.portfolio.repo.add_paper_order(
             client_order_id=f"{pos.client_order_id}-x", ticker=pos.ticker, side=pos.side, action="sell",

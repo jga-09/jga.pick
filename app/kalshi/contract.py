@@ -57,6 +57,7 @@ class ContractTerms:
     problems: tuple[str, ...] = ()
     notes: tuple[str, ...] = ()
     asset: str = "BTC"
+    inclusive: bool = True  # strike itself counts for YES ("at least" / greater_or_equal; ties go to YES)
 
     @property
     def yes_means(self) -> str:
@@ -64,13 +65,15 @@ class ContractTerms:
             return "unverified"
         avg = f" ({self.averaging_window_sec}s average)" if self.averaging_window_sec else ""
         word = "ABOVE" if self.kind == "above" else "BELOW"
+        word = f"AT OR {word}" if self.inclusive else word
         return f"{self.asset} settles {word} ${self.threshold:,.2f}{avg} per {self.settlement_source}"
 
     @property
     def no_means(self) -> str:
         if self.kind is None or self.threshold is None:
             return "unverified"
-        word = "AT OR BELOW" if self.kind == "above" else "AT OR ABOVE"
+        word = "BELOW" if self.kind == "above" else "ABOVE"
+        word = word if self.inclusive else f"AT OR {word}"  # a tie belongs to YES when the strike is inclusive
         return f"{self.asset} settles {word} ${self.threshold:,.2f}"
 
     def direction_for_side(self, side: str) -> str:
@@ -171,4 +174,5 @@ def interpret_contract(info: MarketInfo, *, require_rules: bool = True,
         problems=tuple(problems),
         notes=tuple(notes),
         asset=asset or "BTC",
+        inclusive=st in ("greater_or_equal", "less_or_equal"),
     )

@@ -222,3 +222,13 @@ async def test_live_unknown_outcome_blocks_the_market(repo, monkeypatch):
         await live.buy(ticket(mode="live"), quote_snapshot(make_info()), confirmed=True)
     ctx = portfolio.risk_context(mode="live", trading_enabled=True, disabled_reason="", mode_permitted=True)
     assert "KXBTC15M-TEST" in ctx.inflight_tickers and client.create_order_v2.await_count == 1
+
+
+async def test_live_reply_without_order_id_is_looked_up_not_treated_as_no_fill(repo):
+    t = ticket(mode="live")
+    live, client, portfolio = await _live_with(repo, AsyncMock(return_value=[
+        {"client_order_id": t.client_order_id, "order_id": "o7", "fill_count_fp": "5.00", "yes_price_dollars": "0.6400"}]))
+    client.create_order_v2 = AsyncMock(return_value={"unexpected": "shape"})  # filled, but no order_id in the reply
+    pos = await live.buy(t, quote_snapshot(make_info()), confirmed=True)
+    assert pos.contracts == 5  # the real fill is tracked instead of "IOC order was not filled"
+    assert client.create_order_v2.await_count == 1

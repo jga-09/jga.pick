@@ -153,7 +153,7 @@ async def test_crash_recovery_blocks_market_with_untracked_fill(repo):
         [{"client_order_id": "c1", "order_id": "o1", "fill_count_fp": "2.00", "remaining_count_fp": "0.00",
           "yes_price_dollars": "0.6000"}] if t == "T1" else []))
     c.get_fills = AsyncMock(return_value=[])
-    notes, block = await recover_orders(c, repo)
+    notes, block = await recover_orders(c, repo, min_age_sec=0)
     assert block == {"T1"} and any("FILLED 2" in n for n in notes)
     st = {r["client_order_id"]: r["status"] for r in repo.live_orders()}
     assert st == {"c1": "filled", "c2": "not_placed"}

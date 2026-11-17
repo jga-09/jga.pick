@@ -1277,7 +1277,9 @@ class BotRuntime:
             return self.reconcile_report
         report = ReconcileReport(at=now)
         try:
-            report.recovered, blocked = await recover_orders(client, self.repo)
+            # periodic checks skip orders this process may still be confirming; startup recovery checks everything
+            report.recovered, blocked = await recover_orders(client, self.repo, busy=set(self.portfolio.inflight),
+                                                             min_age_sec=120.0 if periodic else 0.0)
             report.mismatches = compare_positions(self.portfolio.open_positions("live"),
                                                   await client.get_market_positions())
         except KalshiError as exc:

@@ -186,3 +186,60 @@ def test_live_order_book_beats_the_cached_market_summary():
     assert (snap.yes_bid, snap.yes_ask, snap.no_bid, snap.no_ask) == (16.0, 18.0, 82.0, 84.0)
     empty = build_snapshot(make_info("HYPE"), stale, OrderBook(), ())
     assert empty.yes_ask == 21.0  # no book at all: fall back to the summary
+
+
+def test_ws_yes_update_also_moves_the_no_side():
+    from app.kalshi.market_data import MarketDataService, build_snapshot
+    from tests.conftest import make_info
+
+    md = MarketDataService(client=None)
+    info = make_info("HYPE")
+    md.latest[info.ticker] = build_snapshot(info, {"yes_bid_dollars": "0.4000", "yes_ask_dollars": "0.4200",
+                                                   "status": "active"}, None, ())
+    snap = md.apply_ws_ticker({"market_ticker": info.ticker, "yes_bid_dollars": "0.7000",
+                               "yes_ask_dollars": "0.7200"})
+    assert (snap.yes_bid, snap.yes_ask, snap.no_bid, snap.no_ask) == (70.0, 72.0, 28.0, 30.0)
+
+
+async def test_paper_fills_are_never_better_than_the_market(repo):
+    from app.trading.paper import PaperExecutor
+    from app.trading.portfolio import Portfolio
+    from tests.conftest import make_info, quote_snapshot
+    from tests.test_paper import ticket
+
+    paper = PaperExecutor(Portfolio(repo, 1000), slippage_cents=1, fee_rate=0.07)
+    snap = quote_snapshot(make_info(), yes_bid=99.4, yes_ask=99.5)
+    pos = await paper.buy(ticket(limit_price_cents=99.9, contracts=1), snap)
+    assert pos.entry_price >= 99.5  # used to fill at 99.0, below the ask
+    low = quote_snapshot(make_info(), yes_bid=0.5, yes_ask=0.6)
+    await paper.sell(pos, low)
+    assert pos.exit_price <= 0.5  # used to sell at 1.0, above the bid
+
+
+def test_contract_wording_ties_go_to_yes():
+    from dataclasses import replace
+
+    from app.kalshi.contract import interpret_contract
+    from tests.test_btc import info
+
+    t = interpret_contract(info())  # greater_or_equal
+    assert "AT OR ABOVE" in t.yes_means and "settles BELOW" in t.no_means
+    strict = interpret_contract(replace(info(), strike_type="greater"))
+    assert "settles ABOVE" in strict.yes_means and "AT OR BELOW" in strict.no_means
+
+
+async def test_recovery_skips_orders_still_being_placed():
+    from datetime import UTC, datetime, timedelta
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.trading.reconcile import recover_orders
+
+    now = datetime.now(UTC)
+    rows = [{"client_order_id": "fresh", "ticker": "A", "created_at": now, "action": "buy", "side": "yes"},
+            {"client_order_id": "busy", "ticker": "B", "created_at": now - timedelta(minutes=10), "action": "buy",
+             "side": "yes"}]
+    repo = MagicMock()
+    repo.live_orders.return_value = rows
+    client = MagicMock(get_orders_all=AsyncMock(return_value=[]))
+    notes, block = await recover_orders(client, repo, busy={"B"})
+    assert notes == [] and block == set() and not client.get_orders_all.called

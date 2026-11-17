@@ -138,7 +138,13 @@ class LiveExecutor:
             repo.update_live_order(coid, status="error", error=str(exc)[:500])
             log_event(log, "LIVE_ORDER_ERROR", logging.ERROR, ticker=ticker, error=exc)
             raise OrderRejectedError(f"exchange rejected order: {exc}") from exc
-        oid = str(resp.get("order_id", ""))
+        oid = str(resp.get("order_id") or (resp.get("order") or {}).get("order_id") or "")
+        if not oid:  # unexpected reply shape: never conclude "no fill" without asking Kalshi by our own id
+            repo.update_live_order(coid, status="unknown", error="order reply had no order_id", response=resp)
+            order = await self._find_order(coid, ticker, sent_at)
+            repo.update_live_order(coid, status="reconciled", exchange_order_id=str(order.get("order_id", "")),
+                                   response=order)
+            return await self._confirm(coid, str(order.get("order_id", "")), side, price, fallback=order)
         repo.update_live_order(coid, status="accepted", exchange_order_id=oid, response=resp)
         return await self._confirm(coid, oid, side, price, fallback=resp)
 
