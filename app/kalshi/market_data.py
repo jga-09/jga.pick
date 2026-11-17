@@ -276,16 +276,13 @@ def build_snapshot(
     ts: datetime | None = None,
 ) -> MarketSnapshot:
     q = parse_quotes(market_raw)
-    # Derive missing quotes from the book when possible (YES ask = 100 - best NO bid).
-    if book:
-        if q["yes_bid"] is None and book.best_yes_bid is not None:
-            q["yes_bid"] = book.best_yes_bid
-        if q["no_bid"] is None and book.best_no_bid is not None:
-            q["no_bid"] = book.best_no_bid
-        if q["yes_ask"] is None and book.best_no_bid is not None:
-            q["yes_ask"] = 100 - book.best_no_bid
-        if q["no_ask"] is None and book.best_yes_bid is not None:
-            q["no_ask"] = 100 - book.best_yes_bid
+    # The live order book wins: Kalshi's market summary is cached and can lag the book by 10-20 s (measured
+    # 2026-11-17), so trading on it means deciding and paper-filling at stale prices. YES ask = 100 - best NO bid.
+    if book and (book.yes_bids or book.no_bids):
+        yb, nb = book.best_yes_bid, book.best_no_bid
+        q["yes_bid"], q["no_bid"] = yb, nb
+        q["yes_ask"] = round(100 - nb, 4) if nb is not None else None
+        q["no_ask"] = round(100 - yb, 4) if yb is not None else None
     status = str(market_raw.get("status") or info.status)
     if status != info.status or market_raw.get("result"):
         info = replace(info, status=status, result=str(market_raw.get("result") or info.result))

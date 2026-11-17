@@ -160,3 +160,29 @@ def test_bitcoin_cash_is_never_bitcoin():
 
     assert detect_asset("KXBCH15M Bitcoin Cash 15 min", ["BTC"]) is None
     assert detect_asset("KXBTC15M Bitcoin price 15 min", ["BTC"]) == "BTC"
+
+
+def test_limit_prices_snap_to_kalshis_tapered_ticks():
+    from app.kalshi.execution import build_entry_order, build_exit_order, snap_price
+
+    assert snap_price(11.5, "down") == 11.0 and snap_price(11.5, "up") == 12.0  # whole cents between 10c and 90c
+    assert snap_price(9.55, "down") == 9.5 and snap_price(92.65, "down") == 92.6  # 0.1c steps at the extremes
+    yes = build_entry_order(ticker="T", outcome_side="yes", contracts=1, limit_price_cents=11.5, client_order_id="a")
+    assert yes["price"] == "0.1100"  # never pays more than the limit
+    no = build_entry_order(ticker="T", outcome_side="no", contracts=1, limit_price_cents=88.5, client_order_id="b")
+    assert no["side"] == "ask" and no["price"] == "0.1200"  # NO at 88c <= 88.5c limit
+    ex = build_exit_order(ticker="T", outcome_side="no", contracts=1, limit_price_cents=84.5, client_order_id="c")
+    assert ex["price"] == "0.1500"  # sells NO at 85c >= 84.5c
+
+
+def test_live_order_book_beats_the_cached_market_summary():
+    from app.kalshi.market_data import OrderBook, build_snapshot
+    from tests.conftest import make_info
+
+    stale = {"yes_bid_dollars": "0.2000", "yes_ask_dollars": "0.2100", "no_bid_dollars": "0.7900",
+             "no_ask_dollars": "0.8000", "status": "active"}
+    book = OrderBook(yes_bids=((15.0, 300.0), (16.0, 120.0)), no_bids=((80.0, 50.0), (82.0, 40.0)))
+    snap = build_snapshot(make_info("HYPE"), stale, book, ())
+    assert (snap.yes_bid, snap.yes_ask, snap.no_bid, snap.no_ask) == (16.0, 18.0, 82.0, 84.0)
+    empty = build_snapshot(make_info("HYPE"), stale, OrderBook(), ())
+    assert empty.yes_ask == 21.0  # no book at all: fall back to the summary
