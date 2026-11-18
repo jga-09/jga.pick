@@ -175,6 +175,9 @@ class Settings(BaseSettings):
     # Start the market scanner automatically when the program starts (servers / reboots).
     # Only ever applies in PAPER mode and never while the emergency stop is active.
     auto_start: bool = False
+    # Self-heal: if the scanner has not completed a market check for this long while running, the process exits
+    # and Docker restarts it (restart: unless-stopped); with AUTO_START=true it resumes paper trading. 0 = off.
+    watchdog_stall_sec: float = Field(600.0, ge=0)
 
     log_level: str = "INFO"
 

@@ -291,3 +291,27 @@ def test_take_profit_percent(runtime):
     s = mksig()
     assert "take-profit: up 50%" in (runtime.exit_reason(pos, s, up) or "")
     assert not (runtime.exit_reason(pos, s, almost) or "").startswith("take-profit")
+
+
+async def test_watchdog_restarts_only_a_stuck_scanner(runtime, monkeypatch):
+    from datetime import timedelta as td
+
+    now = utcnow()
+    runtime.store.update(running=True)
+    runtime.started_at = now - td(hours=1)
+    runtime.last_poll_at = now - td(seconds=30)
+    assert runtime.stalled(now) is None  # healthy
+    runtime.last_poll_at = now - td(minutes=15)
+    assert runtime.stalled(now) > 600  # stuck for 15 min
+    runtime.store.update(running=False)
+    assert runtime.stalled(now) is None  # stopped on purpose: never restart
+
+    runtime.store.update(running=True)
+    exits = []
+
+    async def fast_sleep(_):
+        return None
+
+    monkeypatch.setattr("app.runtime.asyncio.sleep", fast_sleep)
+    await runtime._watchdog_loop(exit_fn=exits.append)
+    assert exits == [3]

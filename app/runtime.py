@@ -11,6 +11,7 @@ import shutil
 import html
 import json
 import logging
+import os
 import re
 import time
 from collections.abc import Awaitable, Callable, Iterator
@@ -458,6 +459,8 @@ class BotRuntime:
         self._spawn(self._discovery_loop(), "discovery")
         self._spawn(self._poll_loop(), "poll")
         self._spawn(self._maintenance_loop(), "maintenance")
+        if self.settings.watchdog_stall_sec > 0 and not self.fixture_mode:
+            self._spawn(self._watchdog_loop(), "watchdog")
         if self.settings.live_allowed:
             self._spawn(self._reconcile_all(), "reconcile")  # crash recovery: resolve leftover live orders
         signer = getattr(self.client, "signer", None)
@@ -505,6 +508,35 @@ class BotRuntime:
         await self.send_pnl_image("session_summary", f"summary:{utcnow():%Y%m%d%H%M}",
                                   f"🏁 <b>Bot stopped</b> · today's results ({'real money' if mode == 'live' else 'paper'})",
                                   mode, title="SESSION SUMMARY · TODAY")
+
+    def stalled(self, now: datetime | None = None) -> float | None:
+        """Seconds the scanner has been stuck (no completed market check) while running, or None if healthy."""
+        limit = self.settings.watchdog_stall_sec
+        if not limit or not self.state.running or self.started_at is None:
+            return None
+        now = now or utcnow()
+        last = self.last_poll_at or self.started_at
+        stuck = (now - last).total_seconds()
+        return stuck if stuck > limit else None
+
+    async def _watchdog_loop(self, exit_fn: Callable[[int], Any] = os._exit) -> None:
+        """Restart the whole bot (Docker brings it back) when the scanner is stuck - e.g. after the Chromebook slept
+        or the network broke in a way the retries never recover from. Without this it needed a manual reboot."""
+        while True:
+            await asyncio.sleep(60)
+            stuck = self.stalled()
+            if stuck is None:
+                continue
+            log.critical("WATCHDOG_RESTART scanner stuck for %.0fs - exiting so Docker restarts the bot", stuck)
+            try:
+                await asyncio.wait_for(self.notify(
+                    "watchdog", "watchdog", f"♻️ <b>Bot restarting itself</b>\nNo market check for {stuck / 60:.0f} min "
+                    "(connection lost?). It comes back in about a minute.", everyone=True), 10)
+            except Exception:  # noqa: BLE001 - the restart must happen even if Telegram is unreachable
+                log.warning("WATCHDOG_NOTIFY_FAILED")
+            self.store.save()
+            exit_fn(3)
+            return
 
     def should_auto_start(self) -> tuple[bool, str]:
         if not self.settings.auto_start:
