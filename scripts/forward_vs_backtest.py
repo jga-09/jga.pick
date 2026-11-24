@@ -134,6 +134,7 @@ def main() -> int:
     obs_by: dict[str, list] = defaultdict(list)
     for o in repo.observations(source="btc", settled_only=False, since=since):
         obs_by[o.ticker].append(o)
+    stamps = sorted(_aware(o.ts) for os_ in obs_by.values() for o in os_)
     print(f"\nFORWARD vs BACKTEST since {since:%Y-%m-%d %H:%M} UTC · {len(rows)} closed bot trades\n")
     for asset in assets:
         bot: dict[str, dict] = {}
@@ -161,6 +162,7 @@ def main() -> int:
         only_why: dict[str, list[float]] = defaultdict(list)
         spot_bps: list[float] = []
         ev_gap: list[float] = []
+        ask_gap: list[float] = []
         for t, m in markets.items():
             e = E.entry(m, G.quotes(m), sp, 6, 1)
             bt = None
@@ -192,7 +194,16 @@ def main() -> int:
                         only_why["edge seen between the 1-minute checks / on a different price"].append(bot_c)
             elif bt:
                 missed.append(bt[2])
-                missed_why[why_missed(obs_by.get(t, []), bt[2])].append(bt[2])
+                why = why_missed(obs_by.get(t, []), bt[2])
+                missed_why[why].append(bt[2])
+                if why.startswith("bot's edge"):
+                    at = bt[3]
+                    near = [o for o in obs_by.get(t, []) if abs((_aware(o.ts) - at).total_seconds()) <= 60]
+                    if near:
+                        o = min(near, key=lambda o: abs((_aware(o.ts) - at).total_seconds()))
+                        seen = o.yes_ask if bt[0] == "yes" else o.no_ask
+                        if seen is not None:
+                            ask_gap.append(seen - (bt[1] - 1))  # bt price includes 1c slippage
             # the bot's own spot price and edge vs the backtest's, at each recorded minute of this market
             for o in obs_by.get(t, []):
                 i = sp.at(_aware(o.ts))
@@ -213,6 +224,9 @@ def main() -> int:
         if missed_why:
             print("  why the bot skipped them (from its own per-minute records):")
             print("\n".join(summary(missed_why, len(missed))))
+        if ask_gap:
+            print(f"    on the 'edge under the minimum' ones the bot saw an ask {sum(ask_gap) / len(ask_gap):+.1f}c vs "
+                  f"the 1-minute candle ({len(ask_gap)} compared; + = bot saw a worse price)")
         if only_why:
             print("  why the bot took trades the rule skips:")
             print("\n".join(summary(only_why, len(bot_only))))
@@ -230,6 +244,26 @@ def main() -> int:
             print("  how the bot's trades ended: " + " · ".join(f"{k} {v}" for k, v in sorted(exits.items())))
         if unmatched:
             print(f"  ({len(unmatched)} bot trades on markets without downloaded data)")
+        print()
+    gaps = [(a, b) for a, b in zip(stamps, stamps[1:]) if (b - a).total_seconds() > 180]
+    if stamps:
+        span = (until - since).total_seconds()
+        off = sum((b - a).total_seconds() for a, b in gaps) + max(0.0, (stamps[0] - since).total_seconds()) \
+            + max(0.0, (until - stamps[-1]).total_seconds())
+        print(f"BOT DOWNTIME (no market evaluated for 3+ min): {off / 3600:.1f} h of {span / 3600:.0f} h "
+              f"({off / span:.0%}) in {len(gaps)} gaps")
+        for a, b in sorted(gaps, key=lambda g: g[0] - g[1])[:10]:
+            print(f"   {a:%a %m-%d %H:%M} -> {b:%H:%M} UTC  ({(b - a).total_seconds() / 3600:.1f} h)")
+        hours: dict[int, float] = defaultdict(float)
+        for a, b in gaps:
+            t = a
+            while t < b:
+                nxt = min(b, t.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1))
+                hours[t.hour] += (nxt - t).total_seconds() / 3600
+                t = nxt
+        if hours:
+            print("   downtime by hour of day (UTC): " + " ".join(f"{h:02d}h {v:.0f}" for h, v in sorted(hours.items())
+                                                                  if v >= 0.5))
         print()
     print("Read it: if BOTH matches the backtest but BOT ONLY loses, the bot takes trades the rule skips. If the\n"
           "bot pays more on the same side, fills/timing cost the edge. If MISSED is positive and large, the bot\n"
