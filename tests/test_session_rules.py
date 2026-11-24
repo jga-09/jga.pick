@@ -329,3 +329,13 @@ async def test_watchdog_restarts_only_a_stuck_scanner(runtime, monkeypatch):
     monkeypatch.setattr("app.runtime.asyncio.sleep", fast_sleep)
     await runtime._watchdog_loop(exit_fn=exits.append)
     assert exits == [3]
+
+
+def test_pure_mode_enters_only_at_the_minute_marks_like_the_backtest():
+    def codes(t_left):
+        return {r.code for r in decide(inputs(t_left=t_left), params(minute_aligned=True)).rejections}
+
+    assert NoTrade.OFF_MINUTE not in codes(540)  # exactly 9:00 left
+    assert NoTrade.OFF_MINUTE not in codes(528)  # 12 s after the mark
+    assert NoTrade.OFF_MINUTE in codes(510)  # 30 s after: an edge flicker between checks
+    assert NoTrade.OFF_MINUTE not in {r.code for r in decide(inputs(t_left=510), params()).rejections}

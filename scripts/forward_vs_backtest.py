@@ -81,7 +81,7 @@ def line(name: str, xs: list[float]) -> str:
 FLAG_WORDS = {
     "EXCESSIVE_SPREAD": "spread too wide", "INSUFFICIENT_EV": "bot's edge under the minimum",
     "STALE_DATA": "stale/missing price data", "INSUFFICIENT_LIQUIDITY": "too few contracts at the ask",
-    "TOO_EARLY": "too early", "INSUFFICIENT_TIME": "too late", "TRADING_PAUSED": "paused after losses",
+    "TOO_EARLY": "too early", "OFF_MINUTE": "between minute marks", "INSUFFICIENT_TIME": "too late", "TRADING_PAUSED": "paused after losses",
     "UNFAVORABLE_REGIME": "volatility regime", "SETTLEMENT_UNVERIFIED": "contract rules unverified",
     "LONGSHOT": "price under 5c", "INSUFFICIENT_EVIDENCE": "not enough history",
     "NOT_CALIBRATED": "not calibrated",

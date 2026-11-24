@@ -34,6 +34,7 @@ class NoTrade(StrEnum):
     SETTLEMENT_UNVERIFIED = "Market settlement conditions not verified"
     INSUFFICIENT_TIME = "Insufficient time remaining"
     TOO_EARLY = "Too early in the window"
+    OFF_MINUTE = "Waiting for the minute mark (the backtested entry timing)"
     DAILY_LOSS = "Daily loss limit reached"
     POSITION_LIMIT = "Position limit reached"
     EXCESSIVE_SPREAD = "Excessive spread"
@@ -47,6 +48,9 @@ class NoTrade(StrEnum):
     INSUFFICIENT_EV = "Insufficient expected value"
     INSUFFICIENT_EVIDENCE = "Insufficient historical evidence"
     NOT_CALIBRATED = "Probability estimate poorly calibrated"
+
+
+MINUTE_WINDOW_SEC = 15.0
 
 
 @dataclass(frozen=True)
@@ -111,6 +115,9 @@ class BTCParams:
     # edge after fees, entry 5-95c, and NO momentum-strength / regime / conflict / late-move / width filters.
     # Data health, time, spread, liquidity, calibration and every account limit still apply.
     pure: bool = False
+    # enter only in the first MINUTE_WINDOW_SEC after each whole minute before close - the moments the backtest
+    # checked; edge that flickers up between those checks lost money in the forward test
+    minute_aligned: bool = False
 
 
 @dataclass(frozen=True)
@@ -291,6 +298,12 @@ def decide(inp: BTCInputs, prm: BTCParams) -> BTCSignal:
     if prm.max_time_sec and inp.t_left_sec > prm.max_time_sec:
         no(NoTrade.TOO_EARLY, f"{inp.t_left_sec / 60:.1f} min left; entries only with "
                               f"{prm.max_time_sec / 60:.1f} min or less")
+
+    if prm.minute_aligned:
+        into = (-inp.t_left_sec) % 60  # seconds since the last whole minute before close
+        if into > MINUTE_WINDOW_SEC:
+            no(NoTrade.OFF_MINUTE, f"{into:.0f}s past the minute mark; entries only in the first "
+                                   f"{MINUTE_WINDOW_SEC:.0f}s (as backtested)")
 
     # ---- edge ---------------------------------------------------------------
     edges = side_edges(inp, prm) if est.ok else []

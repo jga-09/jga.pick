@@ -707,7 +707,7 @@ class BotRuntime:
             btc_stale_sec=s.btc_feed_stale_sec, max_skew_sec=s.max_data_skew_sec,
             min_entry_cents=5.0 if s.fair_value_pure else p.min_entry_price_cents,
             max_entry_cents=95.0 if s.fair_value_pure else p.max_entry_price_cents,
-            pure=s.fair_value_pure,
+            pure=s.fair_value_pure, minute_aligned=s.fair_value_pure,
         )
 
     def forward_test_signature(self) -> str | None:
@@ -717,7 +717,7 @@ class BotRuntime:
         if s.strategy_mode != "btc" or not (s.fair_value_pure or set(s.asset_list) - {"BTC"}):
             return None
         return (f"pure={s.fair_value_pure} edge>={s.min_edge_cents:g} "
-                + (f"spread<={PURE_MAX_SPREAD_CENTS:g} no_loss_stops " if s.fair_value_pure else "")
+                + (f"spread<={PURE_MAX_SPREAD_CENTS:g} no_loss_stops minute_aligned " if s.fair_value_pure else "")
                 + f"entry={s.entry_min_left_sec:g}-{s.entry_max_left_sec:g}s left "
                 f"skip_after_loss={s.skip_windows_after_loss} max_per_day={s.max_trades_per_day}")
 
