@@ -83,6 +83,9 @@ from app.utils.time import day_key, utcnow
 log = logging.getLogger(__name__)
 
 
+PURE_MAX_SPREAD_CENTS = 5.0  # FAIR_VALUE_PURE trades only what the backtest traded
+
+
 class Notifier(Protocol):
     async def alert(self, kind: str, key: str, text: str, buttons: list | None = None) -> None: ...
 
@@ -161,7 +164,7 @@ class BotRuntime:
                                 settings.order_price_tolerance_cents, ev_gate=settings.ev_gate,
                                 strategy_mode=settings.strategy_mode, kelly_sizing=settings.kelly_sizing,
                                 fair_value_pure=settings.fair_value_pure,
-                                paper_no_loss_stops=settings.paper_no_loss_stops,
+                                paper_no_loss_stops=settings.paper_keeps_trading,
                                 session=SessionRules(
                                     entry_min_left_sec=settings.entry_min_left_sec,
                                     entry_max_left_sec=settings.entry_max_left_sec,
@@ -690,7 +693,10 @@ class BotRuntime:
         s = self.settings
         return BTCParams(
             min_ev_cents=p.min_ev_cents, min_strength=p.min_btc_strength, max_prob_width=p.max_prob_width,
-            max_spread_cents=p.max_spread_cents, min_liquidity=p.min_liquidity_contracts,
+            # pure: the backtest only traded markets with a spread <= 5c (scripts/guide_test.py quotes())
+            max_spread_cents=(min(p.max_spread_cents, PURE_MAX_SPREAD_CENTS) if s.fair_value_pure
+                              else p.max_spread_cents),
+            min_liquidity=p.min_liquidity_contracts,
             min_time_sec=max(p.min_time_remaining_sec, s.entry_min_left_sec), max_time_sec=s.entry_max_left_sec,
             blocked_regimes=p.regimes_blocked,
             # FAIR_VALUE_PURE is a paper forward test that COLLECTS the calibration evidence, so paper trades never
@@ -711,7 +717,8 @@ class BotRuntime:
         if s.strategy_mode != "btc" or not (s.fair_value_pure or set(s.asset_list) - {"BTC"}):
             return None
         return (f"pure={s.fair_value_pure} edge>={s.min_edge_cents:g} "
-                f"entry={s.entry_min_left_sec:g}-{s.entry_max_left_sec:g}s left "
+                + (f"spread<={PURE_MAX_SPREAD_CENTS:g} no_loss_stops " if s.fair_value_pure else "")
+                + f"entry={s.entry_min_left_sec:g}-{s.entry_max_left_sec:g}s left "
                 f"skip_after_loss={s.skip_windows_after_loss} max_per_day={s.max_trades_per_day}")
 
     def _mark_forward_test(self) -> dict[str, Any] | None:
@@ -772,7 +779,7 @@ class BotRuntime:
         est = estimate_probability(terms, price, bars, now, t_left, self.btc_cfg)
         book = snap.orderbook is not None
         paused = self.adaptive.reason if self.adaptive.mode == "PAUSED" else ""
-        if self.settings.paper_no_loss_stops and self.state.mode == "paper":
+        if self.settings.paper_keeps_trading and self.state.mode == "paper":
             paused = ""  # data collection: paper never pauses for losses
         inp = BTCInputs(
             now=now, terms=terms, features=feats, regime=classify_regime(feats, self.btc_cfg), estimate=est,
@@ -1007,7 +1014,7 @@ class BotRuntime:
         today = day_key()
         if -self.portfolio.daily_realized(pos.mode) >= prof.max_daily_loss_usd and self._daily_limit_alerted != today:
             self._daily_limit_alerted = today
-            keep = self.settings.paper_no_loss_stops and pos.mode == "paper"
+            keep = self.settings.paper_keeps_trading and pos.mode == "paper"
             await self.notify("daily_limit", f"daily:{today}", messages.daily_limit_alert(prof, keep_trading=keep))
 
     # ----------------------------------------------------------------- loops

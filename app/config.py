@@ -202,6 +202,12 @@ class Settings(BaseSettings):
         return frozenset(ids)
 
     @property
+    def paper_keeps_trading(self) -> bool:
+        """PAPER never stops for losses: PAPER_NO_LOSS_STOPS, or FAIR_VALUE_PURE (the forward test must trade
+        exactly the backtested rule, which has no loss pauses, so its results are comparable). Never live."""
+        return self.paper_no_loss_stops or self.fair_value_pure
+
+    @property
     def owner_id(self) -> int:
         """First id in TELEGRAM_ADMIN_IDS: keeps the pre-multi-user account (its data and Kalshi key). 0 if none."""
         for part in self.telegram_admin_ids.replace(" ", "").split(","):

@@ -47,14 +47,15 @@ def _aware(dt: datetime) -> datetime:
 async def download(assets: list[str], since: datetime, until: datetime, cache: Path) -> None:
     s = Settings()
     client = KalshiClient(s)
-    dl = HistoryDownloader(client, cache, concurrency=6, trades=False)
+    dl = HistoryDownloader(client, cache, concurrency=2, trades=False)  # gentle: Kalshi answers 429 above this
     spot = CoinbaseHistory(cache)
     try:
         for asset in assets:
             ser = f"KX{asset}15M"
             markets = await dl.settled_markets(ser, since - timedelta(hours=1), until)
-            for i in range(0, len(markets), 40):
-                await asyncio.gather(*(dl.market_data(ser, m) for m in markets[i:i + 40]))
+            for i in range(0, len(markets), 10):
+                await asyncio.gather(*(dl.market_data(ser, m) for m in markets[i:i + 10]))
+                await asyncio.sleep(0.5)
             day = since.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
             while day <= until:
                 await spot.day(asset, day)
@@ -71,6 +72,40 @@ def line(name: str, xs: list[float]) -> str:
     ci = G.boot(xs)
     rng = f" ({ci[0]:+.1f}..{ci[1]:+.1f}c)" if ci else ""
     return f"  {name:<34} {len(xs):4} · avg {sum(xs) / len(xs):+5.1f}c/contract{rng}"
+
+
+FLAG_WORDS = {
+    "EXCESSIVE_SPREAD": "spread too wide", "INSUFFICIENT_EV": "bot's edge under the minimum",
+    "STALE_DATA": "stale/missing price data", "INSUFFICIENT_LIQUIDITY": "too few contracts at the ask",
+    "TOO_EARLY": "too early", "INSUFFICIENT_TIME": "too late", "TRADING_PAUSED": "paused after losses",
+    "UNFAVORABLE_REGIME": "volatility regime", "SETTLEMENT_UNVERIFIED": "contract rules unverified",
+    "LONGSHOT": "price under 5c", "INSUFFICIENT_EVIDENCE": "not enough history",
+    "NOT_CALIBRATED": "not calibrated",
+}
+
+
+def why_missed(obs: list, bt_edge: float) -> str:
+    """The bot's own per-minute records (observations) for a market the backtest traded."""
+    win = [o for o in obs if 300 <= o.time_remaining <= 690]
+    if not win:
+        return "bot was not scanning (offline / restarting / no data)"
+    if any(o.features.get("approved") for o in win):
+        return "bot's model said BUY but a risk rule blocked it (cooldown, loss pause, open positions, limits)"
+    flags: dict[str, int] = defaultdict(int)
+    for o in win:
+        for f in o.hard_flags:
+            flags[f] += 1
+    if not flags:
+        return "no reason recorded"
+    top = max(flags.items(), key=lambda kv: kv[1])[0]
+    return FLAG_WORDS.get(top, top)
+
+
+def summary(groups: dict[str, list[float]], total: int) -> list[str]:
+    out = []
+    for k, xs in sorted(groups.items(), key=lambda kv: -len(kv[1])):
+        out.append(f"    {len(xs):4} ({len(xs) / max(1, total):4.0%}) avg {sum(xs) / len(xs):+6.1f}c · {k}")
+    return out
 
 
 def main() -> int:
@@ -96,6 +131,9 @@ def main() -> int:
 
     rows = [p for p in repo.closed_positions(mode="paper", since=since, limit=1_000_000)
             if p.asset.upper() in assets and _aware(p.opened_at) >= since and p.realized_pnl is not None]
+    obs_by: dict[str, list] = defaultdict(list)
+    for o in repo.observations(source="btc", settled_only=False, since=since):
+        obs_by[o.ticker].append(o)
     print(f"\nFORWARD vs BACKTEST since {since:%Y-%m-%d %H:%M} UTC · {len(rows)} closed bot trades\n")
     for asset in assets:
         bot: dict[str, dict] = {}
@@ -119,6 +157,10 @@ def main() -> int:
         same_side = price_diff = 0
         diffs: list[float] = []
         exits = defaultdict(int)
+        missed_why: dict[str, list[float]] = defaultdict(list)
+        only_why: dict[str, list[float]] = defaultdict(list)
+        spot_bps: list[float] = []
+        ev_gap: list[float] = []
         for t, m in markets.items():
             e = E.entry(m, G.quotes(m), sp, 6, 1)
             bt = None
@@ -139,8 +181,26 @@ def main() -> int:
                     price_diff += 1
                 else:
                     bot_only.append(bot_c)
+                    near = [o for o in obs_by.get(t, []) if abs((_aware(o.ts) - b["opened"]).total_seconds()) <= 90]
+                    o = min(near, key=lambda o: abs((_aware(o.ts) - b["opened"]).total_seconds())) if near else None
+                    left = (m["close"] - b["opened"]).total_seconds()
+                    if o is not None and o.spread is not None and o.spread > 5:
+                        only_why[f"spread {o.spread:.0f}c at entry (backtest only trades spreads <= 5c)"].append(bot_c)
+                    elif not 300 <= left <= 660:
+                        only_why["entered outside 5-11 min left"].append(bot_c)
+                    else:
+                        only_why["edge seen between the 1-minute checks / on a different price"].append(bot_c)
             elif bt:
                 missed.append(bt[2])
+                missed_why[why_missed(obs_by.get(t, []), bt[2])].append(bt[2])
+            # the bot's own spot price and edge vs the backtest's, at each recorded minute of this market
+            for o in obs_by.get(t, []):
+                i = sp.at(_aware(o.ts))
+                if i is not None and o.features.get("spot") and 300 <= o.time_remaining <= 690:
+                    spot_bps.append(1e4 * (o.features["spot"] / sp.close[i] - 1))
+                    p = G.p_yes(sp.close[i], float(m["strike"]), sp.sigma_per_sec(i), o.time_remaining)
+                    if p is not None and o.features.get("p_yes") is not None:
+                        ev_gap.append(100 * (o.features["p_yes"] - p))
         unmatched = [t for t in bot if t not in markets]
         print(f"=== {asset}: {len(markets)} markets in the period ===")
         print(line("BOTH: bot's actual result", [x for x, _ in both]))
@@ -150,6 +210,22 @@ def main() -> int:
                   f"{sum(diffs) / len(diffs) if diffs else 0:+.1f}c vs the backtest price (+ = worse)")
         print(line("BOT ONLY: trades the rule would skip", bot_only))
         print(line("MISSED: backtest trades the bot skipped", missed))
+        if missed_why:
+            print("  why the bot skipped them (from its own per-minute records):")
+            print("\n".join(summary(missed_why, len(missed))))
+        if only_why:
+            print("  why the bot took trades the rule skips:")
+            print("\n".join(summary(only_why, len(bot_only))))
+        if spot_bps:
+            spot_bps.sort()
+            ab = sorted(abs(x) for x in spot_bps)
+            print(f"  bot's spot price vs Coinbase 1-min close: median {spot_bps[len(spot_bps) // 2]:+.1f} bps, "
+                  f"typical size {ab[len(ab) // 2]:.1f} bps ({len(spot_bps)} minutes)")
+        if ev_gap:
+            ev_gap.sort()
+            ag = sorted(abs(x) for x in ev_gap)
+            print(f"  bot's UP odds vs backtest model, same minute: median {ev_gap[len(ev_gap) // 2]:+.1f} pts, "
+                  f"typical gap {ag[len(ag) // 2]:.1f} pts")
         if exits:
             print("  how the bot's trades ended: " + " · ".join(f"{k} {v}" for k, v in sorted(exits.items())))
         if unmatched:

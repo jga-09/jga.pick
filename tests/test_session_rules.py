@@ -210,6 +210,20 @@ def test_pure_forward_test_never_waits_for_calibration_on_paper(repo):
 
     assert params(False).require_calibration  # Medium normally needs calibrated probabilities
     assert not params(True).require_calibration  # ...but the paper forward test collects that evidence
+    # the backtest only traded spreads <= 5c; Medium's 8c let the bot take trades the rule never tested
+    assert params(False).max_spread_cents == 8 and params(True).max_spread_cents == 5
+
+
+def test_pure_forward_test_has_no_loss_pauses_on_paper_only():
+    from tests.conftest import make_settings
+
+    assert make_settings(fair_value_pure=True).paper_keeps_trading
+    assert make_settings(paper_no_loss_stops=True).paper_keeps_trading
+    assert not make_settings().paper_keeps_trading
+    from app.risk.manager import RiskManager
+
+    rm = RiskManager(PositionSizer(0.07), 30, paper_no_loss_stops=True)
+    assert rm._no_stops(ctx(mode="paper")) and not rm._no_stops(ctx(mode="live"))  # live keeps every limit
 
 
 async def test_short_kalshi_blips_send_no_alerts(runtime):
