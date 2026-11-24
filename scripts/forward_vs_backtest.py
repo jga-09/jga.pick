@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import importlib.util
+import logging
 import sys
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
@@ -45,6 +46,9 @@ def _aware(dt: datetime) -> datetime:
 
 
 async def download(assets: list[str], since: datetime, until: datetime, cache: Path) -> None:
+    # retries after Kalshi's "too many requests" are normal and handled; don't print hundreds of lines
+    logging.getLogger("app.utils.retry").setLevel(logging.ERROR)
+    print("downloading this period's markets (already-downloaded ones are skipped)...", flush=True)
     s = Settings()
     client = KalshiClient(s)
     dl = HistoryDownloader(client, cache, concurrency=2, trades=False)  # gentle: Kalshi answers 429 above this
